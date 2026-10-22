@@ -30,7 +30,7 @@ A native Apple Silicon in-game console, cheat menu, and item browser for Cyberpu
 
 ## Status
 
-macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). It also runs on v2.5 (Steam): the console, item spawning (the catalog includes the items new in 2.5), cheats, the overlay and loose `.archive` mods. The bundled TweakXL/ArchiveXL plugins are 2.3.1 builds, so on 2.5 the launcher leaves them out and mods that need them do not load yet. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
+macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). It also runs on v2.5 (Steam): the console, item spawning (the catalog includes the items new in 2.5), cheats and the overlay. Mods are not supported on 2.5 yet: the 2.5 game itself scans `archive/Mac/mod` and crashes at startup on any `.archive` there (also without NightCity Console), and the bundled TweakXL/ArchiveXL plugins are 2.3.1 builds, so the launcher leaves them out. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
 
 ## What it does
 
@@ -51,7 +51,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command list and known lim
 
 - Apple Silicon Mac (arm64). Intel is not supported.
 - macOS 26 or newer; tested on macOS 26 and 27.
-- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, TweakXL/ArchiveXL mods are not supported yet).
+- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, mods are not supported yet).
 - A legally-owned copy of the game. No CD PROJEKT RED files are distributed by this project.
 
 ## Install and usage (players)

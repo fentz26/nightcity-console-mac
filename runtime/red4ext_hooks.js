@@ -185,29 +185,37 @@ function getModuleBase() {
 // Offsets are relative to the game image base. The 2.5 set was re-derived from the Steam macOS
 // 2.5 binary (3.0.88.46235); 2.3.1 keeps the original values. Only the core console is ported to
 // 2.5 so far - the mod-loading hooks further down still carry 2.3.1-only offsets and skip
-// themselves on any other version (see isGame231()).
+// themselves on any other version (see isGame231()). An unrecognized build gets no offsets at all.
 const GAME_OFFSETS = {
     '2.3.1': { exec: 0x2173120, rttiGet: 0x2188e8c, main: 0x31e18 },
     // frameDtor / poolScriptAllocator: 2.5 grew CScriptStackFrame to 0xA8 with a call map at +0x68
     // that child frames reach through +0x98, so hand-built root frames must initialize it.
-    '2.5':   { exec: 0x1099fbc, rttiGet: 0x10b3cac, main: 0x3249c, frameDtor: 0x11ab310, poolScriptAllocator: 0x7cddb78 },
+    '2.5':   { exec: 0x1099fbc, rttiGet: 0x10b3cac, main: 0x323a0, frameDtor: 0x11ab310, poolScriptAllocator: 0x7cddb78 },
 };
-// First 16 bytes of the 2.5 CRTTISystem::Get (singleton getter at base+0x10b3cac).
-const GAME_25_RTTI_GET_BYTES = 'fd7bbfa9fd030091087d03d008013a91';
+// A build is recognized only by the code bytes at its own CRTTISystem::Get offset (first 16 bytes).
+// Anything else is an unsupported build: gameOffsets() returns null and nothing is hooked or called.
+const GAME_FINGERPRINTS = {
+    '2.5':   'fd7bbfa9fd030091087d03d008013a91',
+    '2.3.1': 'f44fbea9fd7b01a9fd43009108df02d0',
+};
 
-let gameVersion = null;
+let gameVersion;   // undefined = not detected yet, null = unsupported build
 function getGameVersion() {
-    if (gameVersion !== null) return gameVersion;
-    gameVersion = '2.3.1';
-    try {
-        const b = new Uint8Array(getModuleBase().add(GAME_OFFSETS['2.5'].rttiGet).readByteArray(16));
-        let hex = ''; for (let i = 0; i < b.length; i++) hex += ('0' + b[i].toString(16)).slice(-2);
-        if (hex === GAME_25_RTTI_GET_BYTES) gameVersion = '2.5';
-    } catch (e) {}
-    logInfo(`Game version: ${gameVersion}`);
+    if (gameVersion !== undefined) return gameVersion;
+    gameVersion = null;
+    const base = getModuleBase();
+    for (const [ver, fp] of Object.entries(GAME_FINGERPRINTS)) {
+        try {
+            const b = new Uint8Array(base.add(GAME_OFFSETS[ver].rttiGet).readByteArray(16));
+            let hex = ''; for (let i = 0; i < b.length; i++) hex += ('0' + b[i].toString(16)).slice(-2);
+            if (hex === fp) { gameVersion = ver; break; }
+        } catch (e) {}
+    }
+    if (gameVersion) logInfo(`Game version: ${gameVersion}`);
+    else logError('Unsupported game build: no known code fingerprint matched; NightCity Console stays inactive.');
     return gameVersion;
 }
-function gameOffsets() { return GAME_OFFSETS[getGameVersion()]; }
+function gameOffsets() { const v = getGameVersion(); return v ? GAME_OFFSETS[v] : null; }
 function isGame231() { return getGameVersion() === '2.3.1'; }
 
 // Build a caller frame for the universal script executor: code at +0x00, locals/params at
@@ -550,6 +558,7 @@ function installHooks() {
     }
     
     logInfo(`Module base: ${base}`);
+    if (!gameOffsets()) return;   // unsupported build (logged by getGameVersion)
     logInfo('');
     logInfo('Installing hooks...');
     
@@ -638,7 +647,9 @@ rpc.exports = {
           T_F32='0xb64f4a0accc8a8c5',T_BOOL='0xf7bdd5a7c820889d',T_CNAME='0xa5e23de2a2657af9',T_TDB='0x4072151ff3dcf7bc',T_ITEM='0xd15b2274885d7f7d';
     const PLAYER='0xcebecae898e55b86';
     try {
-        const base=getModuleBase(); const OFF=gameOffsets(); const execAddr=base.add(OFF.exec);
+        const base=getModuleBase(); const OFF=gameOffsets();
+        if(!OFF){ log('NightCity Console is inactive: unsupported game build (only 2.3.1 and 2.5 are recognized).'); return; }
+        const execAddr=base.add(OFF.exec);
         const Exec=new NativeFunction(execAddr,'uint64',['pointer','pointer','pointer','pointer','pointer']);
         let reg=null,GetClass=null,GetEnum=null;
         function ensureReg(){ if(reg) return; reg=new NativeFunction(base.add(OFF.rttiGet),'pointer',[])(); const rv=reg.readPointer();
@@ -1227,7 +1238,7 @@ rpc.exports = {
             else log('clean-exit: exit/_exit not resolved'); }catch(e){ log('clean-exit err: '+e); }
         // The real shutdown crash is in the game's own teardown (a stale hook/trampoline call), which runs
         // AFTER the save is flushed but BEFORE exit(). So when Main() returns (game quitting, save done),
-        // _exit(0) immediately - we never reach the crashing teardown. (Main: base+0x31e18 on 2.3.1, base+0x3249c on 2.5.)
+        // _exit(0) immediately - we never reach the crashing teardown. (Main = the LC_MAIN entry: base+0x31e18 on 2.3.1, base+0x323a0 on 2.5.)
         try{ const xP2=resolveExport('_exit');
             if(xP2){ const _x2=new NativeFunction(xP2,'void',['int']);
                 Interceptor.attach(base.add(OFF.main), { onLeave:function(){ try{ clearFile(CMD); }catch(e){} _x2(0); } });
@@ -1409,11 +1420,10 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 //   NOT wired here (DUMP-ONLY ship); this comment records the contract.
 // ============================================================================
 (function installModFolderLoader(){
-    // Engine offsets per game version (2.5: re-derived from the 2.5 binary; the loader, Append and
-    // LoadArchives keep their 2.3.1 signatures and the ArchiveSet / depot layouts are unchanged).
-    var ML = isGame231()
-        ? { cstrCtor: 0x2cdb8, poolReserve: 0x2c904, append: 0x3edd568, enumSet: 0x3eda684, loadArchives: 0x3edaae8, scopeLoader: 0x3edafcc }
-        : { cstrCtor: 0x2ccac, poolReserve: 0x2c3d4, append: 0x151f6e8, enumSet: null, loadArchives: 0x151ba04, scopeLoader: 0x151cb08 };
+    // 2.3.1 only. On 2.5 the game scans archive/Mac/mod itself and crashes at startup on any .archive there
+    // (reproduced without NightCity loaded), so registering the folder again is not done there.
+    if(!isGame231()){ try{ console.log('[installModFolderLoader] skipped on game '+getGameVersion()+' (the game loads archive/Mac/mod itself)'); }catch(e){} return; }
+    var ML = { cstrCtor: 0x2cdb8, poolReserve: 0x2c904, append: 0x3edd568, enumSet: 0x3eda684, loadArchives: 0x3edaae8, scopeLoader: 0x3edafcc };
     var MODDIR_LOG = '/tmp/cp2077_edafcc.log';
     // U4 SAFETY GATE: DUMP-ONLY by default. Do NOT flip to true until the dump
     // in /tmp/cp2077_moddir.log confirms stride 0x38 / basePath@0x08 / scope@0x30.

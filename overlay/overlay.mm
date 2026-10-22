@@ -172,17 +172,21 @@ static uintptr_t nccGameBase(){
     return base;
 }
 
-// Per-game-version offsets (mirror GAME_OFFSETS in runtime/red4ext_hooks.js). 2.5 is detected by the
-// code bytes of its CRTTISystem::Get; anything else falls back to the original 2.3.1 values.
+// Per-game-version offsets (mirror GAME_OFFSETS in runtime/red4ext_hooks.js). A build is recognized only by the
+// code bytes at its own CRTTISystem::Get offset; an unrecognized build gets all-zero offsets and no game calls.
 struct NccOffsets { uintptr_t exec, rttiGet, frameDtor, poolScriptAllocator; };
-static const NccOffsets NCC_OFFSETS_231 = { 0x2173120, 0x2188e8c, 0, 0 };
-static const NccOffsets NCC_OFFSETS_25  = { 0x1099fbc, 0x10b3cac, 0x11ab310, 0x7cddb78 };
+static const NccOffsets NCC_OFFSETS_231  = { 0x2173120, 0x2188e8c, 0, 0 };
+static const NccOffsets NCC_OFFSETS_25   = { 0x1099fbc, 0x10b3cac, 0x11ab310, 0x7cddb78 };
+static const NccOffsets NCC_OFFSETS_NONE = { 0, 0, 0, 0 };
+static const uint8_t NCC_FP_25[16]  = { 0xfd,0x7b,0xbf,0xa9,0xfd,0x03,0x00,0x91,0x08,0x7d,0x03,0xd0,0x08,0x01,0x3a,0x91 };
+static const uint8_t NCC_FP_231[16] = { 0xf4,0x4f,0xbe,0xa9,0xfd,0x7b,0x01,0xa9,0xfd,0x43,0x00,0x91,0x08,0xdf,0x02,0xd0 };
 static const NccOffsets& nccOffsets(){
     static const NccOffsets* off = nullptr;
     if (off) return *off;
-    static const uint8_t rttiGet25[16] = { 0xfd,0x7b,0xbf,0xa9,0xfd,0x03,0x00,0x91,0x08,0x7d,0x03,0xd0,0x08,0x01,0x3a,0x91 };
     uintptr_t base = nccGameBase();
-    off = (base && memcmp((const void*)(base + NCC_OFFSETS_25.rttiGet), rttiGet25, 16) == 0) ? &NCC_OFFSETS_25 : &NCC_OFFSETS_231;
+    if (base && memcmp((const void*)(base + NCC_OFFSETS_25.rttiGet), NCC_FP_25, 16) == 0) off = &NCC_OFFSETS_25;
+    else if (base && memcmp((const void*)(base + NCC_OFFSETS_231.rttiGet), NCC_FP_231, 16) == 0) off = &NCC_OFFSETS_231;
+    else { off = &NCC_OFFSETS_NONE; olog("unsupported game build: no known code fingerprint matched; native calls disabled"); }
     return *off;
 }
 // Caller frame for the executor (code +0x00, locals +0x10/+0x18, ctx +0x40). 2.5 grew CScriptStackFrame
@@ -200,6 +204,8 @@ static uint8_t* nccNewFrame(void* code, void* locals, void* ctx){
     }
     return frame;
 }
+// The engine destructor (2.5) only releases the call map at +0x68..+0x90 through the allocator at +0x90; it
+// does not touch code/locals/context or free the frame itself, which stays ours to free.
 static void nccFreeFrame(uint8_t* frame){
     if (!frame) return;
     const NccOffsets& off = nccOffsets();
@@ -211,6 +217,7 @@ static void* g_nccReg = nullptr; static NccGetClassFn g_nccGetClass = nullptr;
 static void nccEnsureReg(){
     if (g_nccReg) return;
     uintptr_t base = nccGameBase(); if (!base) return;
+    if (!nccOffsets().rttiGet) return;                         // unsupported build
     NccRegGetter getter = (NccRegGetter)(base + nccOffsets().rttiGet);   // CRTTISystem::Get
     g_nccReg = getter(); if (!g_nccReg) return;
     void* vt = *(void**)g_nccReg;                              // registry vtable
@@ -252,6 +259,7 @@ static void nccHexDump(const char* label, const void* p, int n){
 // Heap-allocated (16-byte aligned, like Frida Memory.alloc) to match the working hooks.js path.
 // Returns the executor's own return code (for diagnostics).
 static uint64_t nccCallNoArg(void* fn, void* ctx, void* retType, uint8_t* result16){
+    if (!nccOffsets().exec) return 0;                          // unsupported build
     NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     uint8_t* bc = (uint8_t*)calloc(1, 64); if(bc) bc[0]=0x26;  // ParamEnd
     uint8_t* locals = (uint8_t*)calloc(1, 0x40);
@@ -260,7 +268,7 @@ static uint64_t nccCallNoArg(void* fn, void* ctx, void* retType, uint8_t* result
     uint64_t rc = Exec(fn, ctx, frame, result16, retType);
     nccHexDump("  locals[0:0x20] post", locals, 0x20);
     nccHexDump("  frame[0:0x20] post", frame, 0x20);
-    free(bc); free(locals); nccFreeFrame(frame);
+    nccFreeFrame(frame); free(bc); free(locals);   // frame first: it points at bc/locals
     return rc;
 }
 // Fetch a LIVE player handle via the Q7 bridge right before a native call (avoids the stale-handle gap).
@@ -298,6 +306,7 @@ static uint64_t nccTypeName(void* type){ if(!type) return 0; void* vt=*(void**)t
 // parsed by the param type. result16 = 16-byte out buffer. Returns the executor rc; on a marshalling
 // error returns 0 and fills *err. gameItemID (T_ITEM) is not yet ported (still goes via the bridge).
 static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, uint8_t* result16, std::string* err){
+    if (!nccOffsets().exec) return 0;                          // unsupported build
     NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     void* pEntries = *(void**)((uintptr_t)f->fn + 0x28);
     uint32_t pCount = *(uint32_t*)((uintptr_t)f->fn + 0x30);
@@ -337,7 +346,7 @@ static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, 
     uint8_t* frame = nccNewFrame(bc, locals, ctx);
     memset(result16,0,16);
     uint64_t rc = Exec(f->fn, ctx, frame, result16, f->retType);
-    for(void* cp:props) free(cp); free(bc); free(locals); nccFreeFrame(frame);
+    nccFreeFrame(frame); for(void* cp:props) free(cp); free(bc); free(locals);   // frame first: it points at bc/locals/props
     return rc;
 }
 
@@ -347,6 +356,7 @@ static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, 
 enum { NCC_HANDLE, NCC_RAW, NCC_I32, NCC_U64 };
 struct NccItem { int kind; void* inst; const void* raw; int n; uint64_t v; };
 static uint64_t nccCallRaw(const NccFn* f, void* ctx, const std::vector<NccItem>& items, uint8_t* result16){
+    if (!nccOffsets().exec) return 0;                          // unsupported build
     NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     void* pEntries = *(void**)((uintptr_t)f->fn + 0x28);
     uint8_t* locals = (uint8_t*)calloc(1, 0x40 + items.size()*0x20);
@@ -367,7 +377,7 @@ static uint64_t nccCallRaw(const NccFn* f, void* ctx, const std::vector<NccItem>
     uint8_t* frame = nccNewFrame(bc, locals, ctx);
     memset(result16,0,16);
     uint64_t rc = Exec(f->fn, ctx, frame, result16, f->retType);
-    for(void* cp:props) free(cp); free(bc); free(locals); nccFreeFrame(frame);
+    nccFreeFrame(frame); for(void* cp:props) free(cp); free(bc); free(locals);   // frame first: it points at bc/locals/props
     return rc;
 }
 static bool nccSane(void* p){ uintptr_t v=(uintptr_t)p; return v>0x10000ULL && v<0x800000000000ULL; }

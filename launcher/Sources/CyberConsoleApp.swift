@@ -202,6 +202,50 @@ final class Model: ObservableObject {
         return d["CFBundleShortVersionString"] as? String
     }
 
+    // MARK: - 2.3.1-only files on other game versions
+
+    // Where 2.3.1-only files that NightCity installed are parked on other game versions (reversible).
+    var parkedDir: String { "\(red4Dir)/nightcity-disabled" }
+    // red4ext-relative paths of the 2.3.1-only files, with the bundled copy that proves NightCity installed them.
+    func files231(_ res: URL) -> [(rel: String, ownerCheck: String, bundled: URL)] {
+        var out = Const.payload231Only.map { (rel: $0, ownerCheck: $0, bundled: res.appendingPathComponent($0)) }
+        for name in ["TweakXL", "ArchiveXL"] {
+            out.append((rel: "plugins/\(name)", ownerCheck: "plugins/\(name)/\(name).dylib",
+                        bundled: res.appendingPathComponent("plugins/\(name)/\(name).dylib")))
+        }
+        return out
+    }
+    // Move NightCity's own 2.3.1-only files out of the load path into parkedDir. A file is ours only when it is
+    // byte-identical to the copy bundled in this app; anything else is left alone and returned for the status.
+    func park231Files(_ res: URL) throws -> [String] {
+        let fm = FileManager.default
+        var leftInPlace: [String] = []
+        for f in files231(res) where fm.fileExists(atPath: "\(red4Dir)/\(f.rel)") {
+            let owned = fm.fileExists(atPath: f.bundled.path)
+                && fm.contentsEqual(atPath: "\(red4Dir)/\(f.ownerCheck)", andPath: f.bundled.path)
+            guard owned else { leftInPlace.append(f.rel); continue }
+            let dst = "\(parkedDir)/\(f.rel)"
+            try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }   // an older parked copy of our own file
+            try fm.moveItem(atPath: "\(red4Dir)/\(f.rel)", toPath: dst)
+        }
+        return leftInPlace
+    }
+    // Back on 2.3.1: move parked files back where they were (install() then refreshes them from the bundle).
+    func restoreParked() throws {
+        let fm = FileManager.default
+        guard let res = Bundle.main.resourceURL, fm.fileExists(atPath: parkedDir) else { return }
+        for f in files231(res) where fm.fileExists(atPath: "\(parkedDir)/\(f.rel)") && !fm.fileExists(atPath: "\(red4Dir)/\(f.rel)") {
+            let dst = "\(red4Dir)/\(f.rel)"
+            try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try fm.moveItem(atPath: "\(parkedDir)/\(f.rel)", toPath: dst)
+        }
+        // drop the parking folder once nothing is left in it
+        let left = (fm.enumerator(atPath: parkedDir)?.allObjects as? [String] ?? [])
+            .filter { var d: ObjCBool = false; return !($0 as NSString).lastPathComponent.hasPrefix("._") && fm.fileExists(atPath: "\(parkedDir)/\($0)", isDirectory: &d) && !d.boolValue }
+        if left.isEmpty { try? fm.removeItem(atPath: parkedDir) }
+    }
+
     func install() {
         guard gameFound else { status = "Game not found."; return }
         guard let res = Bundle.main.resourceURL else { status = "Bundle resources missing."; return }
@@ -209,6 +253,7 @@ final class Model: ObservableObject {
         let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: red4Dir, withIntermediateDirectories: true)
+            if pluginsSupported { try restoreParked() }   // before the copies below refresh them from the bundle
             for f in payloadFiles {
                 let src = res.appendingPathComponent(f)
                 guard fm.fileExists(atPath: src.path) else { status = "Missing bundled file: \(f)"; return }
@@ -240,21 +285,14 @@ final class Model: ObservableObject {
                     try fm.copyItem(at: src, to: URL(fileURLWithPath: dstPath))
                 }
             }
-            if !pluginsSupported {
-                // A 2.3.1-era install leaves its AddressLib and plugins behind; on this game version they
-                // would hook the wrong code, so take them out of the load path.
-                for f in Const.payload231Only where fm.fileExists(atPath: "\(red4Dir)/\(f)") {
-                    try fm.removeItem(atPath: "\(red4Dir)/\(f)")
-                }
-                for name in ["TweakXL", "ArchiveXL"] where fm.fileExists(atPath: "\(red4Dir)/plugins/\(name)") {
-                    try fm.removeItem(atPath: "\(red4Dir)/plugins/\(name)")
-                }
-            }
+            var leftInPlace: [String] = []
+            if !pluginsSupported { leftInPlace = try park231Files(res) }
             try deployScc()            // redscript compiler -> <game>/engine/tools/ (script-mod support)
             stripQuarantine(red4Dir)   // files we just wrote (incl. plugins/*) -> make dyld load them
             guard ensureGameEntitlements() else { return }   // status set on failure
-            status = "Installed - click Play."
-            refresh()
+            refresh()   // before the message below: refresh() rewrites status
+            status = leftInPlace.isEmpty ? "Installed - click Play."
+                : "Installed - click Play. Left in place (not installed by NightCity, built for game 2.3.1): \(leftInPlace.joined(separator: ", ")). Move them out of red4ext/ if the game crashes."
         } catch {
             let msg = error.localizedDescription
             if looksLikePermissionError(msg) || gameOnExternalDrive {
@@ -594,6 +632,9 @@ final class Model: ObservableObject {
         guard gameFound else { status = "Game not found."; return }
         guard fullyInstalled() else { status = "Install NightCity Console first, then add mods."; return }
         guard nctoolPath() != nil else { status = "nctool helper missing from the app bundle."; return }
+        // On 2.5 the game itself scans archive/Mac/mod at startup and crashes on any .archive placed there
+        // (reproduced without NightCity loaded), so installing mods would leave the game unable to start.
+        guard pluginsSupported else { status = "Mods can't be installed on game \(gameVersion ?? "this version") yet: the game crashes at startup on any .archive in archive/Mac/mod (happens without NightCity too)."; return }
         guard !busy else { status = "Please wait for the current mod to finish installing."; return }
         let base = url.deletingPathExtension().lastPathComponent
         busy = true; progress = 0; busyDetail = "Reading \(base)…"; status = "Installing \(base)…"

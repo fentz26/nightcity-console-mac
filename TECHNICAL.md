@@ -78,13 +78,13 @@ A subtle but important distinction: RTTI method/class lookups use FNV-1a 64-bit,
 
 ### Game 2.5 (3.0.88.46235)
 
-The runtime detects the game version at startup (by the code bytes of the 2.5 `CRTTISystem::Get`) and picks an offset set; see `GAME_OFFSETS` in `runtime/red4ext_hooks.js` and `nccOffsets()` in `overlay/overlay.mm`. The 2.5 values were re-derived from the 2.5 binary:
+The runtime recognizes a build only by the first 16 code bytes at its own `CRTTISystem::Get` offset (2.3.1: `f44fbea9fd7b01a9fd43009108df02d0` at `+0x2188e8c`; 2.5: `fd7bbfa9fd030091087d03d008013a91` at `+0x10b3cac`; checked against both Steam binaries, neither matches the other's). Any other build gets no offsets and NightCity Console stays inactive. It picks an offset set; see `GAME_OFFSETS` in `runtime/red4ext_hooks.js` and `nccOffsets()` in `overlay/overlay.mm`. The 2.5 values were re-derived from the 2.5 binary:
 
 | Symbol / purpose | 2.3.1 | 2.5 |
 |---|---|---|
 | Universal script executor `(func, context, frame, result, resultType)` | `module_base + 0x2173120` | `module_base + 0x1099fbc` |
 | `CRTTISystem::Get` (singleton getter) | `module_base + 0x2188e8c` | `module_base + 0x10b3cac` |
-| `Main` (clean-shutdown hook) | `module_base + 0x31e18` | `module_base + 0x3249c` |
+| `Main` (clean-shutdown hook; the `LC_MAIN` entry) | `module_base + 0x31e18` | `module_base + 0x323a0` |
 | Opcode handler table | `module_base + 0x908b798` | `module_base + 0x9a5c940` |
 | `CScriptStackFrame` destructor | n/a | `module_base + 0x11ab310` |
 | PoolScript allocator (frame call map) | n/a | `module_base + 0x7cddb78` |
@@ -94,18 +94,9 @@ The executor was found through the FinalFunc opcode handler (table entry 0x24), 
 - `CScriptStackFrame` grew from 0x68 to 0xA8. A root frame owns a call map at +0x68 and points +0x98 at it; child frames copy the parent's +0x98. The executor builds its child frame from the caller frame it is given, so a hand-built caller frame must be 0xA8 bytes and initialized like the engine's own constructor does (isRoot at +0x64, the map's -1 marker at +0x88, the PoolScript allocator at +0x90, +0x98 = frame + 0x68), then destroyed with the frame destructor after the call. A 0x90-byte frame without this makes the engine read past the end of it.
 - Function objects grew by 0x40 bytes after `unkAC` (`CClassFunction` is now 0x100, `parent` at +0xF0). The fields used here (names at +0x08/+0x10, return type at +0x18, params at +0x28/+0x30) did not move, and `CClass` function arrays are still at +0x48/+0x58. The `IRTTISystem` slots used here (`GetClass` +0x10, `GetEnum` +0x18) are unchanged; 2.5 added four virtuals before the destructor.
 
-The loose-archive loader (section 9) is ported too. Its engine functions keep their 2.3.1 signatures and the `ArchiveSet` / depot layouts are unchanged (groups DynArray at depot+0x10, stride 0x38, size at +0x0C); the per-scope config entries are still 0x140 bytes:
+Loose-archive mods (section 9) are not supported on 2.5. The 2.5 game scans `archive/Mac/mod` itself at startup and crashes (SIGSEGV in its own archive loading, reached from `module_base + 0x151a118`) on any `.archive` there, including an unmodified copy of one of its own content archives, with no NightCity Console code loaded. The mod-folder loader therefore stays 2.3.1-only, and the launcher refuses to install mods on 2.5.
 
-| Purpose | 2.3.1 | 2.5 |
-|---|---|---|
-| Per-scope loose-archive loader | `module_base + 0x3edafcc` | `module_base + 0x151cb08` |
-| `ArchiveSet` `Append` | `module_base + 0x3edd568` | `module_base + 0x151f6e8` |
-| `LoadArchives` | `module_base + 0x3edaae8` | `module_base + 0x151ba04` |
-| Archive glob (`*.archive`) | `module_base + 0x3eda360` | `module_base + 0x151b064` |
-| `CString(const char*)` | `module_base + 0x2cdb8` | `module_base + 0x2ccac` |
-| CString pool reserve | `module_base + 0x2c904` | `module_base + 0x2c3d4` |
-
-Not yet ported to 2.5: the RED4ext-style `CONFIG.hooks` other than `Main`, the ArchiveXL/TweakXL integration hooks (factory/mesh hooks, localization hook, native registration and bind diagnostics) and the vendored TweakXL/ArchiveXL plugins with their AddressLib, which are 2.3.1 builds. The hooks check `isGame231()` and skip themselves on other versions instead of attaching to unrelated code, and the launcher does not deploy the plugins, the AddressLib or the gum hook offsets there.
+Not yet ported to 2.5: the RED4ext-style `CONFIG.hooks` other than `Main`, the mod-folder loader, the ArchiveXL/TweakXL integration hooks (factory/mesh hooks, localization hook, native registration and bind diagnostics) and the vendored TweakXL/ArchiveXL plugins with their AddressLib, which are 2.3.1 builds. The hooks check `isGame231()` and skip themselves on other versions instead of attaching to unrelated code, and the launcher does not deploy the plugins, the AddressLib or the gum hook offsets there. Copies of the plugins and the AddressLib that the launcher itself installed earlier (byte-identical to the bundled ones) are moved to `red4ext/nightcity-disabled/` and moved back on 2.3.1; any other copy is left in place and named in the launcher's status line.
 
 New 2.5 items in the catalog: scripts cannot enumerate TweakDB, so the record lists were read from `r6/cache/tweakdb.bin` of both builds (records section: `u32 count`, then `{u32 crc32, u32 length, u32 type hash}`; 2.3.1 is depot 1460472 manifest 5981221262164233110). An item is new when its record ID is absent from the 2.3.1 file and its record type is one of the item types. That gives 118 records; one of them, `Items.Preset_Ashura_Twitch`, is a Phantom Liberty record that 2.5 moved from `tweakdb_ep1.bin` into the base file, so it is not new (the OPEN//77 2.31 catalogues, which include EP1, list it). Record existence and record names are separate questions: the `itemdump` console command resolved every new ID to its display name and item type in-game, and a name string was accepted only when it matches both the crc32 and the length (candidates from `tweakdb.bin`, `final.redscripts` and name templates). Unresolved IDs are listed in CET's `<TDBID:crc32:length>` form, which `give` accepts. Spawning was checked separately in-game with `give` followed by `removeitem`: all non-shard items were found in the inventory; shards go to the journal on pickup (old shards behave the same), so they are not removable. Two records whose display name is `!OBSOLETE` are left out.
 
