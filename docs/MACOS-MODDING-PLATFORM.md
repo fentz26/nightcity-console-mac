@@ -256,7 +256,7 @@ The overlay is Dear ImGui (by Omar Cornut) composited on the live Metal frame. T
 
 Three present variants exist on different hardware (`presentDrawable:`, `presentDrawable:atTime:`, `presentDrawable:afterMinimumDuration:`); all three are hooked, with nesting depth tracked so ImGui renders only once per frame on the outermost call.
 
-The overlay carries a declarative JSON tab engine: tabs are defined as `{ id, title, widgets[...] }` loaded from `~/Library/Application Support/NightCity Console/tabs/` with mtime polling and hot reload, so new tabs (Vehicles, World/Weather, Stat editor) ship without rebuilding. The built-in tabs are Console, Items (a 7,552-item catalog in `cet_catalog.tsv`), Quick, Creator, and Mods.
+The overlay carries a declarative JSON tab engine: tabs are defined as `{ id, title, widgets[...] }` loaded from `~/Library/Application Support/NightCity Console/tabs/` with mtime polling and hot reload, so new tabs (Vehicles, World/Weather, Stat editor) ship without rebuilding. The built-in tabs are Console, Items (a 7,667-item catalog in `cet_catalog.tsv`), Quick, Creator, and Mods.
 
 ### Launcher and Steam integration
 

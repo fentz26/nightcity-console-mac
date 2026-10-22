@@ -628,7 +628,11 @@ rpc.exports = {
     function fnv(str){ let h=BigInt('0xCBF29CE484222325'); const P=BigInt('0x100000001b3'),M=(BigInt(1)<<BigInt(64))-BigInt(1); for(let i=0;i<str.length;i++){h^=BigInt(str.charCodeAt(i));h=(h*P)&M;} return h; }
     function u64(bi){ return uint64('0x'+bi.toString(16)); }
     function crc32(str){ let crc=0xFFFFFFFF; for(let i=0;i<str.length;i++){ let c=(crc^str.charCodeAt(i))&0xFF; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); crc=(crc>>>8)^c; } return (crc^0xFFFFFFFF)>>>0; }
-    function tdbidBytes(n){ const h=crc32(n); return [h&0xff,(h>>>8)&0xff,(h>>>16)&0xff,(h>>>24)&0xff,n.length&0xff,0,0,0]; }
+    // TweakDBID bytes for a record name, or for CET's hashed form <TDBID:XXXXXXXX:LL> (crc32 hex, length hex) used for
+    // records whose name string is not known (e.g. items new in a game patch).
+    function tdbidBytes(n){ const m=/^<TDBID:([0-9A-Fa-f]{1,8}):([0-9A-Fa-f]{1,2})>$/.exec(n);
+        const h=m?(parseInt(m[1],16)>>>0):crc32(n), len=m?parseInt(m[2],16):n.length;
+        return [h&0xff,(h>>>8)&0xff,(h>>>16)&0xff,(h>>>24)&0xff,len&0xff,0,0,0]; }
     const FV0=ptr('0x100000000');
     const T_I32='0xb9a127f5b4a621bf',T_U32='0x3d2e9dd9e3c28d8c',T_I64='0xb9902ff5b497bc24',T_U64='0x3d3f99d9e3d0f9f3',
           T_F32='0xb64f4a0accc8a8c5',T_BOOL='0xf7bdd5a7c820889d',T_CNAME='0xa5e23de2a2657af9',T_TDB='0x4072151ff3dcf7bc',T_ITEM='0xd15b2274885d7f7d';
@@ -722,7 +726,7 @@ rpc.exports = {
         function fromTDBID(tb,out){ const bc=Memory.alloc(32);let o=0;bc.writeU8(0x11);o++;for(let i=0;i<8;i++){bc.add(o).writeU8(tb[i]);o++;}bc.add(o).writeU8(0x26);
             const fr=newScriptFrame(bc,null,fromtd?fromtd.ctx:ptr(0));const rc=Exec(fromtd.fn,fromtd.ctx,fr,out,fromtd.retType);freeScriptFrame(fr);return rc; }
         // generic invoke: fn(CClassFunction*), ctx, args[] strings -> 16-byte result buffer
-        function callFunc(fn, ctx, retType, args){
+        function callFunc(fn, ctx, retType, args, resSize){
             const pEntries=fn.add(0x28).readPointer(); const pCount=fn.add(0x30).readU32();
             const locals=Memory.alloc(0x40+args.length*0x20); const props=[];
             for(let i=0;i<args.length;i++){ if(i>=pCount) throw 'too many args (fn takes '+pCount+')';
@@ -742,7 +746,7 @@ rpc.exports = {
                 const cp=Memory.alloc(0x30); cp.writePointer(ptype); cp.add(0x20).writeU32(off); props.push(cp); }
             const bc=Memory.alloc(16+args.length*9); let o=0; for(let i=0;i<args.length;i++){ bc.add(o).writeU8(0x18);o++; bc.add(o).writePointer(props[i]);o+=8; } bc.add(o).writeU8(0x26);
             const fr=newScriptFrame(bc, locals, ctx);
-            const res=Memory.alloc(16); res.writeU64(0); res.add(8).writeU64(0); Exec(fn, ctx, fr, res, retType); freeScriptFrame(fr); return res; }
+            const rs=resSize||16; const res=Memory.alloc(rs); for(let ro=0;ro<rs;ro+=8) res.add(ro).writeU64(0); Exec(fn, ctx, fr, res, retType); freeScriptFrame(fr); return res; }
         function instOf(className){ const m=clsByName(className); if(!m) return null; const fv=m.sub(base).add(FV0).toString(16); return instReg[fv]||null; }
         function doGive(name,qty,forceBulk){ const e=resolveFunc('gameTransactionSystem','GiveItem'); if(!e){ log('GiveItem not found'); return; }
             const tx=instOf('gameTransactionSystem'); if(!tx){ log('no transaction system instance yet'); return; }
@@ -955,8 +959,16 @@ rpc.exports = {
             return null;
         }
         function doRemove(name,qty){
-            const e=resolveFunc('gameTransactionSystem','RemoveItem'); if(!e){ log('RemoveItem not found'); return; }
             const tx=instOf('gameTransactionSystem'); if(!tx){ log('no transaction system instance yet'); return; }
+            // Spawned items carry their own ItemID seeds, so removing by a freshly built ItemID rarely matches;
+            // RemoveItemByTDBID removes by record instead. Fall back to RemoveItem where it does not exist.
+            const bt=resolveFunc('gameTransactionSystem','RemoveItemByTDBID');
+            if(bt){ try{ const h=Memory.alloc(16); h.writePointer(authPlayer()); h.add(8).writePointer(refcnt);
+                const args=[{raw:h,n:16}, name, String(qty)]; if(bt.fn.add(0x30).readU32()>3) args.push('false');
+                const ok=callFunc(bt.fn, tx, bt.retType, args).readU8(); log('remove '+name+' x'+qty+' -> '+ok);
+                if(!ok) log('  (not removed - bad item id, or you don\'t have it; names start with "Items.")'); }catch(ex){ log('remove err: '+ex); }
+                return; }
+            const e=resolveFunc('gameTransactionSystem','RemoveItem'); if(!e){ log('RemoveItem not found'); return; }
             const id=Memory.alloc(16); id.writeU64(0); id.add(8).writeU64(0); fromTDBID(tdbidBytes(name),id);
             try{ const r=callFuncRaw(e.fn, tx, e.retType, [{kind:'handle',inst:authPlayer()},{kind:'item16',ptr:id},{kind:'i32',v:qty}]);
                 const ok=r.readU8(); log('remove '+name+' x'+qty+' -> '+ok); if(!ok) log('  (not removed - bad item id, or you don\'t have it; names start with "Items.")'); }catch(ex){ log('remove err: '+ex); }
@@ -1063,7 +1075,7 @@ rpc.exports = {
         // Translate common CET copy-paste one-liners into our commands (so internet snippets paste directly).
         function cetTranslate(line){ let m;
             // Game.AddToInventory("Items.X" [, qty])   -- by far the most copy-pasted CET call
-            m=line.match(/^Game\.AddToInventory\(\s*['"]([A-Za-z0-9_.]+)['"]\s*(?:,\s*([0-9]+))?\s*\)\s*;?\s*$/);
+            m=line.match(/^Game\.AddToInventory\(\s*['"]([A-Za-z0-9_.]+|<TDBID:[0-9A-Fa-f]+:[0-9A-Fa-f]+>)['"]\s*(?:,\s*([0-9]+))?\s*\)\s*;?\s*$/);
             if(m) return 'give '+m[1]+' '+(m[2]||'1');
             return null; }
         function luaRespond(seq, type, val){ try{ var f=new File(LRES,'w'); f.write(seq+'\t'+type+'\t'+val+'\n'); f.flush(); f.close(); }catch(e){} }
@@ -1076,6 +1088,52 @@ rpc.exports = {
                 if(method==='GetPlayer'||method==='GetPlayerControlledGameObject'){ if(player&&!player.isNull()) luaRespond(seq,'ptr','0x'+player.toString(16)); else luaRespond(seq,'nil',''); return; }
                 luaRespond(seq,'err','Game.'+method+'() needs main-thread dispatch (wired in Q8+); Q7 proves the bridge via GetPlayer');
             }catch(e){ luaRespond(seq,'err',''+e); }
+        }
+        // ===== itemdump <idfile>: resolve TweakDB item IDs to display names / item types =====
+        // Scripts cannot enumerate TweakDB, so the IDs come from a file (one "crc32hex<TAB>length" per line,
+        // e.g. read offline from r6/cache/tweakdb.bin). Output: /tmp/cp2077_itemdump.tsv with
+        // crc32, length, display name (localized), gamedataItemType member, quality member.
+        // Used to extend the Items-tab catalog for a new game version.
+        function readRedString(p){ try{ const lf=p.add(0x14).readU32(); const n=lf&0x3FFFFFFF; if(!n) return '';
+            return ((lf&0x40000000)?p.readPointer():p).readUtf8String(n); }catch(e){ return ''; } }
+        function resolveGlobal(names){ ensureReg(); const rv=reg.readPointer();
+            const GetFunction=new NativeFunction(rv.add(0x30).readPointer(),'pointer',['pointer','uint64']);
+            for(const n of names){ const f=GetFunction(reg,u64(fnv(n))); if(!f.isNull()){ const rp=f.add(0x18).readPointer(); return {fn:f, retType:rp.isNull()?ptr(0):rp.readPointer(), name:n}; } }
+            return null; }
+        function enumMemberName(enumName, value, toStr){ ensureReg(); const en=GetEnum(reg,u64(fnv(enumName))); if(en.isNull()) return '';
+            const hp=en.add(0x28).readPointer(), n=en.add(0x30).readU32(), vp=en.add(0x38).readPointer();
+            for(let i=0;i<n;i++){ if(vp.add(i*8).readU64().equals(value)) return toStr(hp.add(i*8).readU64()); } return ''; }
+        function doItemDump(idFile){
+            const OUTF='/tmp/cp2077_itemdump.tsv';
+            const txt=readFile(idFile||'/tmp/cp2077_itemids.txt'); if(!txt){ log('itemdump: id file not found'); return; }
+            const getRec=resolveAny(['gamedataTweakDBInterface','TweakDBInterface'],'GetItemRecord');
+            const dispName=resolveFunc('gamedataItem_Record','DisplayName');
+            const itemType=resolveFunc('gamedataItem_Record','ItemType');
+            const typeEnum=resolveFunc('gamedataItemType_Record','Type');
+            const quality=resolveFunc('gamedataItem_Record','Quality');
+            const qualEnum=resolveFunc('gamedataQuality_Record','Type');
+            const loc=resolveGlobal(['GetLocalizedTextByKey','GetLocalizedTextByKey;CName','GetLocalizedItemNameByCName','GetLocalizedItemNameByCName;CName']);
+            const n2s=resolveGlobal(['NameToString','NameToString;CName']);
+            log('itemdump: GetItemRecord='+!!getRec+' DisplayName='+!!dispName+' ItemType='+!!itemType+' Quality='+!!quality+' loc='+(loc?loc.name:'-')+' NameToString='+(n2s?n2s.name:'-'));
+            if(!getRec){ log('itemdump: TweakDBInterface.GetItemRecord not found'); return; }
+            const ctx=player||ptr(0);
+            const toStr=function(h){ if(!n2s) return ''; try{ const b=Memory.alloc(8); b.writeU64(h); return readRedString(callFunc(n2s.fn, ctx, n2s.retType, [{raw:b,n:8}], 0x20)); }catch(e){ return ''; } };
+            const f=new File(OUTF,'w'); let ok=0, miss=0;
+            for(const line of txt.split('\n')){ const parts=line.trim().split(/\s+/); if(parts.length<2||!parts[0]) continue;
+                try{
+                    const idb=Memory.alloc(8); idb.writeU32(parseInt(parts[0],16)>>>0); idb.add(4).writeU32(parseInt(parts[1],10)&0xff);
+                    const rec=callFunc(getRec.fn, ctx, getRec.retType, [{raw:idb,n:8}]).readPointer();
+                    if(rec.isNull()){ miss++; continue; }
+                    let disp=''; if(dispName&&loc){ const k=callFunc(dispName.fn, rec, dispName.retType, []).readU64();
+                        if(!k.equals(0)){ const kb=Memory.alloc(8); kb.writeU64(k); disp=readRedString(callFunc(loc.fn, ctx, loc.retType, [{raw:kb,n:8}], 0x20)); } }
+                    let tname=''; if(itemType&&typeEnum){ const th=callFunc(itemType.fn, rec, itemType.retType, []).readPointer();
+                        if(!th.isNull()) tname=enumMemberName('gamedataItemType', callFunc(typeEnum.fn, th, typeEnum.retType, []).readU64(), toStr); }
+                    let qname=''; if(quality&&qualEnum){ const qh=callFunc(quality.fn, rec, quality.retType, []).readPointer();
+                        if(!qh.isNull()) qname=enumMemberName('gamedataQuality', callFunc(qualEnum.fn, qh, qualEnum.retType, []).readU64(), toStr); }
+                    f.write(parts[0]+'\t'+parts[1]+'\t'+disp.replace(/[\t\n\r]/g,' ')+'\t'+tname+'\t'+qname+'\n'); ok++;
+                }catch(e){ if(ok+miss<3) log('itemdump '+parts[0]+' err '+e); }
+            }
+            f.close(); log('itemdump: wrote '+ok+' records ('+miss+' not item records) to '+OUTF);
         }
         function execute(line){ let raw=line.trim();
             if(raw.indexOf('lua-call\t')===0){ handleLuaCall(raw); return; }   // Q7 bridge: handle before the generic whitespace split
@@ -1119,6 +1177,7 @@ rpc.exports = {
                     if(!vt.isNull()){ shown++; const mm=instType(mlc); const cm=instType(ctx); log('modsbutton: VALID mlc='+mlc+' class='+(mm?nameOf(mm):'?')+'  (ctx class '+(cm?nameOf(cm):'?')+')'); }
                 }catch(e){ log('modsbutton cb err '+e); } });
                 log('modsbutton: armed (read-only sig capture). Open a menu so AddMenuItem fires; "modsbutton off" clears.'); return; }   // capture PushData contract before we call it
+            if(t[0]==='itemdump'){ doItemDump(t[1]); return; }   // TweakDB is readable from the main menu
             if(!player){ log('NOT IN GAME yet: '+line); return; }
             if(t[0]==='give'&&t[1]){ doGive(t[1], Math.max(1,parseInt(t[2]||'1')||1)); return; }
             if(t[0]==='money'&&t[1]){ doGive('Items.money', Math.max(1,parseInt(t[1])||1), true); return; }   // currency: always one bulk add
@@ -1350,7 +1409,11 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 //   NOT wired here (DUMP-ONLY ship); this comment records the contract.
 // ============================================================================
 (function installModFolderLoader(){
-    if(!isGame231()){ try{ console.log('[installModFolderLoader] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
+    // Engine offsets per game version (2.5: re-derived from the 2.5 binary; the loader, Append and
+    // LoadArchives keep their 2.3.1 signatures and the ArchiveSet / depot layouts are unchanged).
+    var ML = isGame231()
+        ? { cstrCtor: 0x2cdb8, poolReserve: 0x2c904, append: 0x3edd568, enumSet: 0x3eda684, loadArchives: 0x3edaae8, scopeLoader: 0x3edafcc }
+        : { cstrCtor: 0x2ccac, poolReserve: 0x2c3d4, append: 0x151f6e8, enumSet: null, loadArchives: 0x151ba04, scopeLoader: 0x151cb08 };
     var MODDIR_LOG = '/tmp/cp2077_edafcc.log';
     // U4 SAFETY GATE: DUMP-ONLY by default. Do NOT flip to true until the dump
     // in /tmp/cp2077_moddir.log confirms stride 0x38 / basePath@0x08 / scope@0x30.
@@ -1393,21 +1456,21 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 
     // CString ctor: CString::CString(this, const char*) @ base+0x2cdb8 (zeroes SSO buf + len, interns).
     var fnCStrCtor = null;
-    try { fnCStrCtor = new NativeFunction(base.add(0x2cdb8), 'pointer', ['pointer', 'pointer']); } catch (e) { mlog('CString ctor bind err: ' + e); }
+    try { fnCStrCtor = new NativeFunction(base.add(ML.cstrCtor), 'pointer', ['pointer', 'pointer']); } catch (e) { mlog('CString ctor bind err: ' + e); }
     // pool CString grow @ base+0x2c904 (mirror cmnReserve): grows to a game-pool heap buffer.
     var fnPoolReserve = null;
-    try { fnPoolReserve = new NativeFunction(base.add(0x2c904), 'void', ['pointer', 'uint']); } catch (e) { mlog('pool reserve bind err: ' + e); }
+    try { fnPoolReserve = new NativeFunction(base.add(ML.poolReserve), 'void', ['pointer', 'uint']); } catch (e) { mlog('pool reserve bind err: ' + e); }
     // ArchiveSet::Append(groupsDynArray*, ArchiveSet*) @ base+0x3edd568.
     var fnAppend = null;
-    try { fnAppend = new NativeFunction(base.add(0x3edd568), 'void', ['pointer', 'pointer']); } catch (e) { mlog('Append bind err: ' + e); }
+    try { fnAppend = new NativeFunction(base.add(ML.append), 'void', ['pointer', 'pointer']); } catch (e) { mlog('Append bind err: ' + e); }
     // Per-set enumerator (scan+load) @ base+0x3eda684. ABI uncertain (U1) -- called
     // best-effort as (set, &set.archives, 0,0,0); guarded in try/catch.
     var fnEnum = null;
-    try { fnEnum = new NativeFunction(base.add(0x3eda684), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('enum bind err: ' + e); }
+    if (ML.enumSet) { try { fnEnum = new NativeFunction(base.add(ML.enumSet), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('enum bind err: ' + e); } }
     // LoadArchives(depot, set, &dirCString, &outBuffer, &prefixCString, &prefix2CString) @ base+0x3edaae8.
     // Decoded from a live args-probe: x4 = filename prefix ("ep1_"), x5 = prefix base + "\\" ("ep1\\").
     var fnLoadArchives = null;
-    try { fnLoadArchives = new NativeFunction(base.add(0x3edaae8), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('LoadArchives bind err: ' + e); }
+    try { fnLoadArchives = new NativeFunction(base.add(ML.loadArchives), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('LoadArchives bind err: ' + e); }
 
     // Build a red::CString for an absolute path. Prefer the engine ctor (0x2cdb8);
     // for long paths back it with the pool allocator (0x2c904) mirroring cmnPutStr
@@ -1492,7 +1555,9 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
                 return root.replace(/[\/\\]+$/, '');
             }
         } catch (e) {}
-        return '/Users/ysr/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077';
+        // Fallback: <game>/Cyberpunk2077.app/Contents/MacOS/Cyberpunk2077 -> <game>
+        try { return Process.enumerateModules().find(function (m) { return m.name === 'Cyberpunk2077'; }).path.replace(/\/Cyberpunk2077\.app\/Contents\/MacOS\/[^\/]+$/, ''); } catch (e) {}
+        return '.';
     }
 
     var didWrite = false;
@@ -1570,7 +1635,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
     var OFF_E_PREFIX = 0x88;   // entry+0x88 = filename-prefix CString (LoadArchives x4)
     var OFF_E_PATH   = 0xa8;   // entry+0xa8 = path/subfolder CString (registrar name + LoadArchives x5)
     var fnEdafcc = null;
-    try { fnEdafcc = new NativeFunction(base.add(0x3edafcc), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('edafcc bind err: ' + e); }
+    try { fnEdafcc = new NativeFunction(base.add(ML.scopeLoader), 'void', ['pointer', 'pointer', 'pointer', 'pointer', 'pointer']); } catch (e) { mlog('edafcc bind err: ' + e); }
 
     function dumpEntries(depot, x1, arrStart, arrEnd, x4){
         try {
@@ -1609,7 +1674,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
             if (!fnCStrCtor || !fnLoadArchives) { mlog('  replay: missing ctor/LoadArchives -- abort'); return; }
             // 3-arg Append: FUN_103edd568(groups, &seed, &descriptor) -> newSet (returns x0).
             var fnAppend3 = null;
-            try { fnAppend3 = new NativeFunction(base.add(0x3edd568), 'pointer', ['pointer', 'pointer', 'pointer']); }
+            try { fnAppend3 = new NativeFunction(base.add(ML.append), 'pointer', ['pointer', 'pointer', 'pointer']); }
             catch (e) { mlog('  Append3 bind err: ' + e); return; }
 
             var gameDir = gameDirFrom(cap.depot);
@@ -1644,7 +1709,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 
     var ranOnce = false;
     try {
-        var hookAddr = base.add(0x3edafcc); // per-scope loader (loops depot+0x68 array)
+        var hookAddr = base.add(ML.scopeLoader); // per-scope loader (loops depot+0x68 array)
         Interceptor.attach(hookAddr, {
             onEnter: function (args) {
                 this.depot = args[0]; this.x1 = args[1]; this.arrStart = args[2]; this.arrEnd = args[3]; this.x4 = args[4];
@@ -1672,7 +1737,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
         // args + derefs for the first calls (content/ep1/patch) so we can replicate the call for archive/Mac/mod.
         try {
             var laCalls = 0;
-            Interceptor.attach(base.add(0x3edaae8), {
+            Interceptor.attach(base.add(ML.loadArchives), {
                 onEnter: function (a) {
                     if (laCalls++ >= 6) return;
                     var c = this.context;
@@ -1687,7 +1752,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
                     // x3 is a stack ptr (caller scratch); x4/x5 heap (context). Knowing these = replication-ready.
                 }
             });
-            mlog('LoadArchives args-probe attached @ ' + base.add(0x3edaae8) + ' (0x3edaae8)');
+            mlog('LoadArchives args-probe attached @ ' + base.add(ML.loadArchives) + ' (0x3edaae8)');
         } catch (e) { mlog('LoadArchives probe err: ' + e); }
     } catch (e) { mlog('install FAILED: ' + e); }
 })();

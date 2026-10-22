@@ -94,7 +94,20 @@ The executor was found through the FinalFunc opcode handler (table entry 0x24), 
 - `CScriptStackFrame` grew from 0x68 to 0xA8. A root frame owns a call map at +0x68 and points +0x98 at it; child frames copy the parent's +0x98. The executor builds its child frame from the caller frame it is given, so a hand-built caller frame must be 0xA8 bytes and initialized like the engine's own constructor does (isRoot at +0x64, the map's -1 marker at +0x88, the PoolScript allocator at +0x90, +0x98 = frame + 0x68), then destroyed with the frame destructor after the call. A 0x90-byte frame without this makes the engine read past the end of it.
 - Function objects grew by 0x40 bytes after `unkAC` (`CClassFunction` is now 0x100, `parent` at +0xF0). The fields used here (names at +0x08/+0x10, return type at +0x18, params at +0x28/+0x30) did not move, and `CClass` function arrays are still at +0x48/+0x58. The `IRTTISystem` slots used here (`GetClass` +0x10, `GetEnum` +0x18) are unchanged; 2.5 added four virtuals before the destructor.
 
-Not yet ported to 2.5: the RED4ext-style `CONFIG.hooks` other than `Main`, and every mod-loading hook (loose-archive loader, factory/mesh hooks, localization hook, native registration and bind diagnostics). They check `isGame231()` and skip themselves on other versions instead of attaching to unrelated code.
+The loose-archive loader (section 9) is ported too. Its engine functions keep their 2.3.1 signatures and the `ArchiveSet` / depot layouts are unchanged (groups DynArray at depot+0x10, stride 0x38, size at +0x0C); the per-scope config entries are still 0x140 bytes:
+
+| Purpose | 2.3.1 | 2.5 |
+|---|---|---|
+| Per-scope loose-archive loader | `module_base + 0x3edafcc` | `module_base + 0x151cb08` |
+| `ArchiveSet` `Append` | `module_base + 0x3edd568` | `module_base + 0x151f6e8` |
+| `LoadArchives` | `module_base + 0x3edaae8` | `module_base + 0x151ba04` |
+| Archive glob (`*.archive`) | `module_base + 0x3eda360` | `module_base + 0x151b064` |
+| `CString(const char*)` | `module_base + 0x2cdb8` | `module_base + 0x2ccac` |
+| CString pool reserve | `module_base + 0x2c904` | `module_base + 0x2c3d4` |
+
+Not yet ported to 2.5: the RED4ext-style `CONFIG.hooks` other than `Main`, the ArchiveXL/TweakXL integration hooks (factory/mesh hooks, localization hook, native registration and bind diagnostics) and the vendored TweakXL/ArchiveXL plugins with their AddressLib, which are 2.3.1 builds. The hooks check `isGame231()` and skip themselves on other versions instead of attaching to unrelated code, and the launcher does not deploy the plugins, the AddressLib or the gum hook offsets there.
+
+New 2.5 items in the catalog: scripts cannot enumerate TweakDB, so the record lists were read from `r6/cache/tweakdb.bin` of both builds (records section: `u32 count`, then `{u32 crc32, u32 length, u32 type hash}`; 2.3.1 is depot 1460472 manifest 5981221262164233110). An item is new when its record ID is absent from the 2.3.1 file and its record type is one of the item types. That gives 118 records; one of them, `Items.Preset_Ashura_Twitch`, is a Phantom Liberty record that 2.5 moved from `tweakdb_ep1.bin` into the base file, so it is not new (the OPEN//77 2.31 catalogues, which include EP1, list it). Record existence and record names are separate questions: the `itemdump` console command resolved every new ID to its display name and item type in-game, and a name string was accepted only when it matches both the crc32 and the length (candidates from `tweakdb.bin`, `final.redscripts` and name templates). Unresolved IDs are listed in CET's `<TDBID:crc32:length>` form, which `give` accepts. Spawning was checked separately in-game with `give` followed by `removeitem`: all non-shard items were found in the inventory; shards go to the journal on pickup (old shards behave the same), so they are not removable. Two records whose display name is `!OBSOLETE` are left out.
 
 ## 4. Calling a game function
 

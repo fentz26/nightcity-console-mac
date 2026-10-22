@@ -4,7 +4,10 @@ import UniformTypeIdentifiers
 
 enum Const {
     static let appVersion = "1.5.0"
-    static let supportedGameVersions = ["2.3.1", "2.5.0"]   // 2.5: core console only, mod loading not ported yet
+    static let supportedGameVersions = ["2.3.1", "2.5.0"]
+    // Payload files that only work on game 2.3.1: the RED4ext AddressLib is a 2.3.1 address list, and on any
+    // other version RED4ext would resolve its hashes to the wrong code.
+    static let payload231Only: Set<String> = ["cyberpunk2077_addresses.json"]
     static let defaultGame = "\(NSHomeDirectory())/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077"
     // Files copied from the app's Resources into <game>/red4ext/ on install. config.ini is REQUIRED - RED4ext
     // reads [plugins] enabled=true from it; without it no plugins load. cyberpunk2077_addresses.json is its
@@ -56,18 +59,22 @@ final class Model: ObservableObject {
     var binaryPath: String { "\(gamePath)/Cyberpunk2077.app/Contents/MacOS/Cyberpunk2077" }
     var red4Dir: String { "\(gamePath)/red4ext" }
     var gameFound: Bool { FileManager.default.fileExists(atPath: binaryPath) }
+    // The vendored RED4ext plugins (TweakXL / ArchiveXL), their AddressLib and the gum hook offsets are built
+    // for game 2.3.1. On 2.5 only the console runtime is installed; the plugin path stays off until ported.
+    var pluginsSupported: Bool { (gameVersion ?? readGameVersion() ?? "2.3.1") == "2.3.1" }
+    var payloadFiles: [String] { Const.payload.filter { pluginsSupported || !Const.payload231Only.contains($0) } }
 
     // the three dylibs DYLD_INSERT_LIBRARIES will load (must all exist before launch)
     var injectDylibs: [String] { ["RED4ext.dylib", "FridaGadget.dylib", "libcyberconsole_overlay.dylib"] }
     func fullyInstalled() -> Bool {
         let fm = FileManager.default
-        let core = Const.payload.allSatisfy { fm.fileExists(atPath: "\(red4Dir)/\($0)") }
+        let core = payloadFiles.allSatisfy { fm.fileExists(atPath: "\(red4Dir)/\($0)") }
         let tweakXL = fm.fileExists(atPath: "\(gamePath)/red4ext/plugins/TweakXL/TweakXL.dylib")
         let archiveXL = fm.fileExists(atPath: "\(gamePath)/red4ext/plugins/ArchiveXL/ArchiveXL.dylib")
         // scc (the redscript compiler) is required only when the app bundle actually ships it, so old
         // installs self-heal via play()'s install() call without bricking dev builds that lack it.
         let scc = sccResourcePath() == nil || fm.fileExists(atPath: sccGamePath)
-        return core && tweakXL && archiveXL && scc
+        return core && (!pluginsSupported || (tweakXL && archiveXL)) && scc
     }
 
     // MARK: - redscript (scc) integration
@@ -202,7 +209,7 @@ final class Model: ObservableObject {
         let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: red4Dir, withIntermediateDirectories: true)
-            for f in Const.payload {
+            for f in payloadFiles {
                 let src = res.appendingPathComponent(f)
                 guard fm.fileExists(atPath: src.path) else { status = "Missing bundled file: \(f)"; return }
                 let dst = URL(fileURLWithPath: "\(red4Dir)/\(f)")
@@ -224,13 +231,23 @@ final class Model: ObservableObject {
             // its Homebrew spdlog/fmt/yaml-cpp deps rebound to @loader_path). Deploy the whole folder so the
             // plugins load on a Mac with no Homebrew (the reason mods failed on a fresh machine).
             let pluginsSrc = res.appendingPathComponent("plugins")
-            if let names = try? fm.contentsOfDirectory(atPath: pluginsSrc.path) {
+            if pluginsSupported, let names = try? fm.contentsOfDirectory(atPath: pluginsSrc.path) {
                 for name in names where !name.hasPrefix(".") {
                     let src = pluginsSrc.appendingPathComponent(name)
                     let dstPath = "\(gamePath)/red4ext/plugins/\(name)"
                     try fm.createDirectory(atPath: "\(gamePath)/red4ext/plugins", withIntermediateDirectories: true)
                     if fm.fileExists(atPath: dstPath) { try fm.removeItem(atPath: dstPath) }
                     try fm.copyItem(at: src, to: URL(fileURLWithPath: dstPath))
+                }
+            }
+            if !pluginsSupported {
+                // A 2.3.1-era install leaves its AddressLib and plugins behind; on this game version they
+                // would hook the wrong code, so take them out of the load path.
+                for f in Const.payload231Only where fm.fileExists(atPath: "\(red4Dir)/\(f)") {
+                    try fm.removeItem(atPath: "\(red4Dir)/\(f)")
+                }
+                for name in ["TweakXL", "ArchiveXL"] where fm.fileExists(atPath: "\(red4Dir)/plugins/\(name)") {
+                    try fm.removeItem(atPath: "\(red4Dir)/plugins/\(name)")
                 }
             }
             try deployScc()            // redscript compiler -> <game>/engine/tools/ (script-mod support)
@@ -373,7 +390,7 @@ final class Model: ObservableObject {
         // folding it into `regen` meant it only ran when /tmp/cp2077_xl_items.txt was missing - i.e. almost
         // never within a session - so the plugin natives silently never reached the bundle. Same skip-logic
         // trap the /tmp enable-flags hit below.
-        let canStagePlugins = nctoolPath() != nil
+        let canStagePlugins = nctoolPath() != nil && pluginsSupported
         let sccReady = fm.isExecutableFile(atPath: sccGamePath)
         if needRegen || needCompile || canStagePlugins {
             busy = true; progress = 0
@@ -423,7 +440,7 @@ final class Model: ObservableObject {
         // relaxation (cp2077_bindpatch) is off -> the redscript binder rejects the graph -> SIGTRAP crash at
         // load with no menu. Creating them unconditionally here is immune to the Regen-skip logic.
         for flag in ["cp2077_codeware_real", "cp2077_bindpatch", "cp2077_bindreject",
-                     "cp2077_binderr", "cp2077_reglog"] {
+                     "cp2077_binderr", "cp2077_reglog"] where pluginsSupported {
             FileManager.default.createFile(atPath: "/tmp/\(flag)", contents: nil)
         }
         // Garment-hook ownership: with the gum gate armed below, RED4ext's manual inline hooks own the
@@ -446,9 +463,11 @@ final class Model: ObservableObject {
         // service enabled: everything reported OK and no character ever arrived. When a correctly-mapped
         // hook appears to do nothing, CHECK THIS LIST FIRST:
         //   grep -o "registered at 0x[0-9a-f]*" <newest red4ext log>   -> those are the no-op'd ones.
-        env["RED4EXT_GUM_HOOKS"] = "scoped"
-        env["RED4EXT_GUM_HOOK_OFFSETS"] = "0x1704194,0xcc0710,0xe189f4,0xe16e68,0xe173fc,0xcb12bc,0x370d924,0x3710004,0xae6660,0xae3840,0x4965de0,0x4965ec0,0x4965980,0x4965b38,0x3d9a028,0x49799b8,0x49b888c,0x49a3084,0x47cf584,0x2197aac,0x4887524,0x49bded0"
-        env["RED4EXT_GUM_MANUAL_OFFSETS"] = "all"
+        if pluginsSupported {   // 2.3.1 offsets; on other versions they would patch unrelated code
+            env["RED4EXT_GUM_HOOKS"] = "scoped"
+            env["RED4EXT_GUM_HOOK_OFFSETS"] = "0x1704194,0xcc0710,0xe189f4,0xe16e68,0xe173fc,0xcb12bc,0x370d924,0x3710004,0xae6660,0xae3840,0x4965de0,0x4965ec0,0x4965980,0x4965b38,0x3d9a028,0x49799b8,0x49b888c,0x49a3084,0x47cf584,0x2197aac,0x4887524,0x49bded0"
+            env["RED4EXT_GUM_MANUAL_OFFSETS"] = "all"
+        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binaryPath)
         p.currentDirectoryURL = URL(fileURLWithPath: gamePath)

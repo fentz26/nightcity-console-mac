@@ -30,12 +30,12 @@ A native Apple Silicon in-game console, cheat menu, and item browser for Cyberpu
 
 ## Status
 
-macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). The core console (commands, item spawning, cheats, overlay) also runs on v2.5 (Steam); the experimental mod-loading hooks (loose archives, TweakXL/ArchiveXL integration) are not ported to 2.5 yet and switch themselves off there. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
+macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). It also runs on v2.5 (Steam): the console, item spawning (the catalog includes the items new in 2.5), cheats, the overlay and loose `.archive` mods. The bundled TweakXL/ArchiveXL plugins are 2.3.1 builds, so on 2.5 the launcher leaves them out and mods that need them do not load yet. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
 
 ## What it does
 
 - In-game ImGui console drawn on the live frame (Metal), keyboard-driven, with tabbed views (Cmd+1/2/3), command history, and clipboard support (Cmd+V/C/X/A).
-- Searchable item browser backed by a bundled catalog of 7,552 items. Browse by category (Weapons, Cyberware, Clothes, Crafting, Mods, Misc) or type to filter, press Enter to spawn the top match, no hunting for ids.
+- Searchable item browser backed by a bundled catalog of 7,667 items. Browse by category (Weapons, Cyberware, Clothes, Crafting, Mods, Misc) or type to filter, press Enter to spawn the top match, no hunting for ids.
 - Pinned favorites that persist across restarts, surfaced in a Quick tab so your go-to gear is one keypress away.
 - One-click cheats: money, full heal, perks, attributes, relic points, set character level.
 - Godmode that registers with the engine godmode system and auto-reapplies across scene and vehicle transitions.
@@ -51,7 +51,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command list and known lim
 
 - Apple Silicon Mac (arm64). Intel is not supported.
 - macOS 26 or newer; tested on macOS 26 and 27.
-- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, mod loading is not available yet).
+- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, TweakXL/ArchiveXL mods are not supported yet).
 - A legally-owned copy of the game. No CD PROJEKT RED files are distributed by this project.
 
 ## Install and usage (players)
@@ -74,7 +74,7 @@ Updating from an older version: after replacing the app, click Install once (it 
 The game captures the mouse during play, so the overlay is keyboard-driven. Switch tabs with Cmd+1 / Cmd+2 / Cmd+3:
 
 - Console (Cmd+1): type commands directly. Up/Down for history, Cmd+V to paste, `help` for the list.
-- Items (Cmd+2): browse by category (Cmd+G cycles categories) or type to search the 7,552-item catalog. Enter spawns the top match, Cmd+P pins it to favorites. Set the quantity first if you want a stack.
+- Items (Cmd+2): browse by category (Cmd+G cycles categories) or type to search the 7,667-item catalog. Enter spawns the top match, Cmd+P pins it to favorites. Set the quantity first if you want a stack.
 - Quick (Cmd+3): one-click cheats, your pinned favorites, and teleport bookmarks.
 
 Common commands (full list in [docs/COMMANDS.md](docs/COMMANDS.md), or `help` in-game):
@@ -118,7 +118,7 @@ For the full reverse-engineering and architecture write-up (offsets, struct layo
 ## Compatibility and caveats
 
 - Steam version only right now. The offsets come from the Steam macOS build; the GOG build differs, so it is not supported yet. GOG support is in progress.
-- Built against v2.3.1, with the core console ported to v2.5 (the game version is detected at startup). Game updates can move offsets and break it. Releases are tagged per supported game version.
+- Built against v2.3.1 and ported to v2.5 (the game version is detected at startup). Game updates can move offsets and break it. Releases are tagged per supported game version.
 - Single-player only. Modding can corrupt saves, so keep backups.
 - Install re-signs the game binary (ad-hoc) so the console can load. This is reversible at any time via Steam's "Verify Integrity of Game Files".
 - macOS arm64 only.

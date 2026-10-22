@@ -9,7 +9,9 @@ LIBS=( "/opt/homebrew/opt/spdlog/lib/libspdlog.1.17.dylib"
        "/opt/homebrew/opt/fmt/lib/libfmt.12.dylib"
        "/opt/homebrew/opt/yaml-cpp/lib/libyaml-cpp.0.9.dylib" )
 for L in "${LIBS[@]}"; do
-  BN="$(basename "$L")"; cp "$L" "$DEST/$BN"; chmod u+w "$DEST/$BN"
+  BN="$(basename "$L")"
+  SRCL="$L"; [ -f "$SRCL" ] || SRCL="$(dirname "$0")/../deps/$BN"   # no Homebrew: use the copy committed in deps/
+  cp "$SRCL" "$DEST/$BN"; chmod u+w "$DEST/$BN"
   install_name_tool -id "@loader_path/$BN" "$DEST/$BN"
   install_name_tool -change "$L" "@loader_path/$BN" "$PLUGIN"
 done

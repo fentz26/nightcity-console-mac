@@ -14,6 +14,8 @@ Use **↑/↓** for history and **Cmd+V/C/X/A** for clipboard. Type `help` in-ga
 | `Game.AddToInventory("Items.Name", n)` | **CET copy-paste** - works verbatim from any CET guide. |
 
 Item IDs are the same `Items.*` TweakDB names CET uses, so codes you find online work here.
+Items whose name string is not known (some records added in game patches) use CET's hashed form, e.g.
+`give <TDBID:7495DECE:17> 1`; the Items tab lists them that way.
 
 ## Character
 | Command | Effect |
@@ -46,6 +48,7 @@ Item IDs are the same `Items.*` TweakDB names CET uses, so codes you find online
 | `call <Class> <method> [args]` | Invoke any **observed** RTTI method (args auto-marshalled). |
 | `sig <Class> <method>` | Print a method's signature. |
 | `convdump` / `devdump` | Diagnostics - dump method signatures. |
+| `itemdump [idfile]` | Resolve TweakDB item IDs (`crc32hex<TAB>length` per line, default `/tmp/cp2077_itemids.txt`) to display name, item type and quality in `/tmp/cp2077_itemdump.tsv`. Used to extend the item catalog after a game patch; works from the main menu. |
 | `clear` / `help` | Clear scrollback / list commands. |
 
 ## Notes & known limits

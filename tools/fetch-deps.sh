@@ -8,9 +8,9 @@
 set -e
 cd "$(dirname "$0")/.."
 mkdir -p deps
-GAME="$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077/red4ext"
+GAME="${CP2077_DIR:-$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077}/red4ext"
 
-copy_if() { [ -f "$1" ] && cp "$1" "deps/$(basename "$1")" && echo "  got $(basename "$1")"; }
+copy_if() { if [ -f "$1" ]; then cp "$1" "deps/$(basename "$1")" && echo "  got $(basename "$1")"; fi; }   # a missing source must not trip set -e
 
 echo "Fetching runtime deps into deps/ ..."
 if [ -d "$GAME" ]; then
@@ -27,7 +27,7 @@ fi
 # script mods into r6/cache/final.redscripts before every launch. Canonical copy lives in the
 # cybermodman repo (extracted redscript-v0.5.31-macos.zip); fall back to the game's deployed copy.
 SCC_SRC="$HOME/cybermodman/redscript/engine/tools"
-[ -f "$SCC_SRC/scc" ] || SCC_SRC="$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077/engine/tools"
+[ -f "$SCC_SRC/scc" ] || SCC_SRC="${CP2077_DIR:-$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077}/engine/tools"
 copy_if "$SCC_SRC/scc"
 copy_if "$SCC_SRC/libscc_lib.dylib"
 
