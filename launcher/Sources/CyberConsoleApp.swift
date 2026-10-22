@@ -206,43 +206,65 @@ final class Model: ObservableObject {
 
     // Where 2.3.1-only files that NightCity installed are parked on other game versions (reversible).
     var parkedDir: String { "\(red4Dir)/nightcity-disabled" }
-    // red4ext-relative paths of the 2.3.1-only files, with the bundled copy that proves NightCity installed them.
-    func files231(_ res: URL) -> [(rel: String, ownerCheck: String, bundled: URL)] {
-        var out = Const.payload231Only.map { (rel: $0, ownerCheck: $0, bundled: res.appendingPathComponent($0)) }
+    // The 2.3.1-only units (AddressLib, each vendored plugin) as red4ext-relative file paths paired with the
+    // bundled copy of each file. `key` is the file that decides whether the unit is NightCity's (the plugin dylib).
+    func units231(_ res: URL) -> [(name: String, key: String, files: [(rel: String, bundled: URL)])] {
+        let fm = FileManager.default
+        var out = Const.payload231Only.map { f in (name: f, key: f, files: [(rel: f, bundled: res.appendingPathComponent(f))]) }
         for name in ["TweakXL", "ArchiveXL"] {
-            out.append((rel: "plugins/\(name)", ownerCheck: "plugins/\(name)/\(name).dylib",
-                        bundled: res.appendingPathComponent("plugins/\(name)/\(name).dylib")))
+            let dir = res.appendingPathComponent("plugins/\(name)")
+            let names = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { !$0.hasPrefix(".") }
+            out.append((name: "plugins/\(name)", key: "plugins/\(name)/\(name).dylib",
+                        files: names.map { (rel: "plugins/\(name)/\($0)", bundled: dir.appendingPathComponent($0)) }))
         }
         return out
     }
-    // Move NightCity's own 2.3.1-only files out of the load path into parkedDir. A file is ours only when it is
-    // byte-identical to the copy bundled in this app; anything else is left alone and returned for the status.
+    // Take NightCity's own 2.3.1-only files out of the load path by moving them into parkedDir, file by file.
+    // A unit counts as NightCity's only when its key file is byte-identical to the bundled copy; then every file
+    // that is byte-identical to a bundled file is moved and anything else in the folder (logs, configs, files the
+    // player added) stays where it is. Units whose key file is not ours are left alone and returned for the status.
     func park231Files(_ res: URL) throws -> [String] {
         let fm = FileManager.default
         var leftInPlace: [String] = []
-        for f in files231(res) where fm.fileExists(atPath: "\(red4Dir)/\(f.rel)") {
-            let owned = fm.fileExists(atPath: f.bundled.path)
-                && fm.contentsEqual(atPath: "\(red4Dir)/\(f.ownerCheck)", andPath: f.bundled.path)
-            guard owned else { leftInPlace.append(f.rel); continue }
-            let dst = "\(parkedDir)/\(f.rel)"
-            try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }   // an older parked copy of our own file
-            try fm.moveItem(atPath: "\(red4Dir)/\(f.rel)", toPath: dst)
+        for u in units231(res) where fm.fileExists(atPath: "\(red4Dir)/\(u.key)") {
+            guard let keyFile = u.files.first(where: { $0.rel == u.key }),
+                  fm.contentsEqual(atPath: "\(red4Dir)/\(u.key)", andPath: keyFile.bundled.path)
+            else { leftInPlace.append(u.name); continue }
+            for f in u.files where fm.fileExists(atPath: "\(red4Dir)/\(f.rel)")
+                && fm.contentsEqual(atPath: "\(red4Dir)/\(f.rel)", andPath: f.bundled.path) {
+                let dst = "\(parkedDir)/\(f.rel)"
+                try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }   // an older parked copy of the same bundled file
+                try fm.moveItem(atPath: "\(red4Dir)/\(f.rel)", toPath: dst)
+            }
         }
         return leftInPlace
     }
-    // Back on 2.3.1: move parked files back where they were (install() then refreshes them from the bundle).
+    // Back on 2.3.1: move parked files back, file by file, without overwriting anything that is in place now
+    // (a parked file that duplicates the file in place is dropped). install() then refreshes them from the bundle.
     func restoreParked() throws {
         let fm = FileManager.default
-        guard let res = Bundle.main.resourceURL, fm.fileExists(atPath: parkedDir) else { return }
-        for f in files231(res) where fm.fileExists(atPath: "\(parkedDir)/\(f.rel)") && !fm.fileExists(atPath: "\(red4Dir)/\(f.rel)") {
-            let dst = "\(red4Dir)/\(f.rel)"
-            try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            try fm.moveItem(atPath: "\(parkedDir)/\(f.rel)", toPath: dst)
+        guard fm.fileExists(atPath: parkedDir) else { return }
+        let parked = (fm.enumerator(atPath: parkedDir)?.allObjects as? [String] ?? []).filter { rel in
+            var d: ObjCBool = false
+            return !(rel as NSString).lastPathComponent.hasPrefix("._")
+                && fm.fileExists(atPath: "\(parkedDir)/\(rel)", isDirectory: &d) && !d.boolValue
         }
-        // drop the parking folder once nothing is left in it
-        let left = (fm.enumerator(atPath: parkedDir)?.allObjects as? [String] ?? [])
-            .filter { var d: ObjCBool = false; return !($0 as NSString).lastPathComponent.hasPrefix("._") && fm.fileExists(atPath: "\(parkedDir)/\($0)", isDirectory: &d) && !d.boolValue }
+        for rel in parked {
+            let src = "\(parkedDir)/\(rel)", dst = "\(red4Dir)/\(rel)"
+            if !fm.fileExists(atPath: dst) {
+                try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+                try fm.moveItem(atPath: src, toPath: dst)
+            } else if fm.contentsEqual(atPath: src, andPath: dst) {
+                try fm.removeItem(atPath: src)
+            }   // else: something else is in place now; keep the parked copy rather than overwrite it
+        }
+        // drop the parking folder once no files are left in it
+        let left = (fm.enumerator(atPath: parkedDir)?.allObjects as? [String] ?? []).filter { rel in
+            var d: ObjCBool = false
+            return !(rel as NSString).lastPathComponent.hasPrefix("._")
+                && fm.fileExists(atPath: "\(parkedDir)/\(rel)", isDirectory: &d) && !d.boolValue
+        }
         if left.isEmpty { try? fm.removeItem(atPath: parkedDir) }
     }
 
@@ -280,9 +302,14 @@ final class Model: ObservableObject {
                 for name in names where !name.hasPrefix(".") {
                     let src = pluginsSrc.appendingPathComponent(name)
                     let dstPath = "\(gamePath)/red4ext/plugins/\(name)"
-                    try fm.createDirectory(atPath: "\(gamePath)/red4ext/plugins", withIntermediateDirectories: true)
-                    if fm.fileExists(atPath: dstPath) { try fm.removeItem(atPath: dstPath) }
-                    try fm.copyItem(at: src, to: URL(fileURLWithPath: dstPath))
+                    try fm.createDirectory(atPath: dstPath, withIntermediateDirectories: true)
+                    // Replace the bundled files one by one; other files in the folder (logs, configs, files the
+                    // player added) are kept.
+                    for f in ((try? fm.contentsOfDirectory(atPath: src.path)) ?? []) where !f.hasPrefix(".") {
+                        let d = "\(dstPath)/\(f)"
+                        if fm.fileExists(atPath: d) { try fm.removeItem(atPath: d) }
+                        try fm.copyItem(at: src.appendingPathComponent(f), to: URL(fileURLWithPath: d))
+                    }
                 }
             }
             var leftInPlace: [String] = []
