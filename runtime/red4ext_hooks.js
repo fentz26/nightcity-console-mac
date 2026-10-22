@@ -180,6 +180,64 @@ function getModuleBase() {
 }
 
 // ============================================================================
+// Game version + per-version offsets
+// ============================================================================
+// Offsets are relative to the game image base. The 2.5 set was re-derived from the Steam macOS
+// 2.5 binary (3.0.88.46235); 2.3.1 keeps the original values. Only the core console is ported to
+// 2.5 so far - the mod-loading hooks further down still carry 2.3.1-only offsets and skip
+// themselves on any other version (see isGame231()).
+const GAME_OFFSETS = {
+    '2.3.1': { exec: 0x2173120, rttiGet: 0x2188e8c, main: 0x31e18 },
+    // frameDtor / poolScriptAllocator: 2.5 grew CScriptStackFrame to 0xA8 with a call map at +0x68
+    // that child frames reach through +0x98, so hand-built root frames must initialize it.
+    '2.5':   { exec: 0x1099fbc, rttiGet: 0x10b3cac, main: 0x3249c, frameDtor: 0x11ab310, poolScriptAllocator: 0x7cddb78 },
+};
+// First 16 bytes of the 2.5 CRTTISystem::Get (singleton getter at base+0x10b3cac).
+const GAME_25_RTTI_GET_BYTES = 'fd7bbfa9fd030091087d03d008013a91';
+
+let gameVersion = null;
+function getGameVersion() {
+    if (gameVersion !== null) return gameVersion;
+    gameVersion = '2.3.1';
+    try {
+        const b = new Uint8Array(getModuleBase().add(GAME_OFFSETS['2.5'].rttiGet).readByteArray(16));
+        let hex = ''; for (let i = 0; i < b.length; i++) hex += ('0' + b[i].toString(16)).slice(-2);
+        if (hex === GAME_25_RTTI_GET_BYTES) gameVersion = '2.5';
+    } catch (e) {}
+    logInfo(`Game version: ${gameVersion}`);
+    return gameVersion;
+}
+function gameOffsets() { return GAME_OFFSETS[getGameVersion()]; }
+function isGame231() { return getGameVersion() === '2.3.1'; }
+
+// Build a caller frame for the universal script executor: code at +0x00, locals/params at
+// +0x10/+0x18, context at +0x40. On 2.5 it is also set up as a root frame the same way the
+// engine's own CScriptStackFrame constructor does it (empty PoolScript call map at +0x68,
+// +0x98 pointing at it); free it with freeScriptFrame() after the call.
+function newScriptFrame(code, locals, ctx) {
+    const fr = Memory.alloc(0xA8);
+    for (let o = 0; o < 0xA8; o += 8) fr.add(o).writeU64(0);
+    fr.writePointer(code);
+    if (locals) { fr.add(0x10).writePointer(locals); fr.add(0x18).writePointer(locals); }
+    fr.add(0x40).writePointer(ctx);
+    const off = gameOffsets();
+    if (off.poolScriptAllocator) {
+        fr.add(0x64).writeU8(1);                                   // isRoot
+        fr.add(0x88).writeU32(0xFFFFFFFF);
+        fr.add(0x90).writePointer(getModuleBase().add(off.poolScriptAllocator));
+        fr.add(0x98).writePointer(fr.add(0x68));
+    }
+    return fr;
+}
+let scriptFrameDtor = null;
+function freeScriptFrame(fr) {
+    const off = gameOffsets();
+    if (!off.frameDtor) return;
+    if (!scriptFrameDtor) scriptFrameDtor = new NativeFunction(getModuleBase().add(off.frameDtor), 'pointer', ['pointer']);
+    scriptFrameDtor(fr);
+}
+
+// ============================================================================
 // Hook Handlers
 // ============================================================================
 
@@ -496,13 +554,23 @@ function installHooks() {
     logInfo('Installing hooks...');
     
     for (const [hashStr, hookInfo] of Object.entries(CONFIG.hooks)) {
-        const { name, offset, enabled } = hookInfo;
-        
+        const { name, enabled } = hookInfo;
+        let offset = hookInfo.offset;
+
         if (!enabled) {
             logDebug(`  [SKIP] ${name} (disabled)`);
             continue;
         }
-        
+
+        // The CONFIG.hooks offsets are 2.3.1 values; only Main has been located on other versions.
+        if (!isGame231()) {
+            if (name !== 'Main') {
+                logInfo(`  [SKIP] ${name} (offset not ported to game ${getGameVersion()})`);
+                continue;
+            }
+            offset = gameOffsets().main;
+        }
+
         const hookFunc = hookFunctions[name];
         if (!hookFunc) {
             logError(`  [ERROR] ${name} - No handler function`);
@@ -566,10 +634,10 @@ rpc.exports = {
           T_F32='0xb64f4a0accc8a8c5',T_BOOL='0xf7bdd5a7c820889d',T_CNAME='0xa5e23de2a2657af9',T_TDB='0x4072151ff3dcf7bc',T_ITEM='0xd15b2274885d7f7d';
     const PLAYER='0xcebecae898e55b86';
     try {
-        const base=getModuleBase(); const execAddr=base.add(0x2173120);
+        const base=getModuleBase(); const OFF=gameOffsets(); const execAddr=base.add(OFF.exec);
         const Exec=new NativeFunction(execAddr,'uint64',['pointer','pointer','pointer','pointer','pointer']);
         let reg=null,GetClass=null,GetEnum=null;
-        function ensureReg(){ if(reg) return; reg=new NativeFunction(base.add(0x2188e8c),'pointer',[])(); const rv=reg.readPointer();
+        function ensureReg(){ if(reg) return; reg=new NativeFunction(base.add(OFF.rttiGet),'pointer',[])(); const rv=reg.readPointer();
             GetClass=new NativeFunction(rv.add(0x10).readPointer(),'pointer',['pointer','uint64']);
             GetEnum =new NativeFunction(rv.add(0x18).readPointer(),'pointer',['pointer','uint64']); }
         let player=null, playerVt=null, fromtd=null, depth=0, busy=false, lastCmd='', lastLReq=''; const pendingQ=[];
@@ -652,7 +720,7 @@ rpc.exports = {
             const hp=en.add(0x28).readPointer(), n=en.add(0x30).readU32(), vp=en.add(0x38).readPointer(); const mh=fnv(member);
             for(let i=0;i<n;i++){ if(hp.add(i*8).readU64().equals(u64(mh))) return vp.add(i*8).readU64(); } return null; }
         function fromTDBID(tb,out){ const bc=Memory.alloc(32);let o=0;bc.writeU8(0x11);o++;for(let i=0;i<8;i++){bc.add(o).writeU8(tb[i]);o++;}bc.add(o).writeU8(0x26);
-            const fr=Memory.alloc(0x90);fr.writePointer(bc);fr.add(0x40).writePointer(fromtd?fromtd.ctx:ptr(0));return Exec(fromtd.fn,fromtd.ctx,fr,out,fromtd.retType); }
+            const fr=newScriptFrame(bc,null,fromtd?fromtd.ctx:ptr(0));const rc=Exec(fromtd.fn,fromtd.ctx,fr,out,fromtd.retType);freeScriptFrame(fr);return rc; }
         // generic invoke: fn(CClassFunction*), ctx, args[] strings -> 16-byte result buffer
         function callFunc(fn, ctx, retType, args){
             const pEntries=fn.add(0x28).readPointer(); const pCount=fn.add(0x30).readU32();
@@ -673,8 +741,8 @@ rpc.exports = {
                 else { let ev=resolveEnumByTypeHash(tn, a); if(ev===null && /^-?\d+$/.test(a)) ev=uint64(parseInt(a)); if(ev!==null){ dst.writeU64(ev); } else throw 'unsupported arg type '+tn+' for "'+a+'"'; }
                 const cp=Memory.alloc(0x30); cp.writePointer(ptype); cp.add(0x20).writeU32(off); props.push(cp); }
             const bc=Memory.alloc(16+args.length*9); let o=0; for(let i=0;i<args.length;i++){ bc.add(o).writeU8(0x18);o++; bc.add(o).writePointer(props[i]);o+=8; } bc.add(o).writeU8(0x26);
-            const fr=Memory.alloc(0x90); fr.writePointer(bc); fr.add(0x10).writePointer(locals); fr.add(0x18).writePointer(locals); fr.add(0x40).writePointer(ctx.isNull?(ctx):ctx);
-            const res=Memory.alloc(16); res.writeU64(0); res.add(8).writeU64(0); Exec(fn, ctx, fr, res, retType); return res; }
+            const fr=newScriptFrame(bc, locals, ctx);
+            const res=Memory.alloc(16); res.writeU64(0); res.add(8).writeU64(0); Exec(fn, ctx, fr, res, retType); freeScriptFrame(fr); return res; }
         function instOf(className){ const m=clsByName(className); if(!m) return null; const fv=m.sub(base).add(FV0).toString(16); return instReg[fv]||null; }
         function doGive(name,qty,forceBulk){ const e=resolveFunc('gameTransactionSystem','GiveItem'); if(!e){ log('GiveItem not found'); return; }
             const tx=instOf('gameTransactionSystem'); if(!tx){ log('no transaction system instance yet'); return; }
@@ -696,8 +764,8 @@ rpc.exports = {
                 else if(it.kind==='i32'){ dst.writeU32(it.v>>>0); }
                 const cp=Memory.alloc(0x30); cp.writePointer(ptype); cp.add(0x20).writeU32(off); props.push(cp); }
             const bc=Memory.alloc(16+items.length*9); let o=0; for(let i=0;i<items.length;i++){ bc.add(o).writeU8(0x18);o++; bc.add(o).writePointer(props[i]);o+=8; } bc.add(o).writeU8(0x26);
-            const fr=Memory.alloc(0x90); fr.writePointer(bc); fr.add(0x10).writePointer(locals); fr.add(0x18).writePointer(locals); fr.add(0x40).writePointer(ctx);
-            const res=Memory.alloc(16); res.writeU64(0); res.add(8).writeU64(0); Exec(fn, ctx, fr, res, retType); return res; }
+            const fr=newScriptFrame(bc, locals, ctx);
+            const res=Memory.alloc(16); res.writeU64(0); res.add(8).writeU64(0); Exec(fn, ctx, fr, res, retType); freeScriptFrame(fr); return res; }
         function sane(pp){ try{ return !pp.isNull() && pp.compare(ptr('0x10000'))>0 && pp.compare(ptr('0x800000000000'))<0; }catch(e){ return false; } }
         function getSystem(giBuf, className){    // giBuf = GetGame result buffer (a GameInstance wrapper)
             const cls=clsByName(className); if(!cls){ log('  class '+className+' not found'); return null; }
@@ -1021,7 +1089,7 @@ rpc.exports = {
             if(t[0]==='archiveprobe'){ try{ var ex=resolveExport('cybermodman_archiveProbeLoadTexts'); if(!ex||ex.isNull()){ log('archiveprobe: cybermodman_archiveProbeLoadTexts export NOT FOUND'); return; } new NativeFunction(ex,'void',[])(); log('archiveprobe: cybermodman_archiveProbeLoadTexts() called - check ArchiveXL.log'); }catch(e){ log('archiveprobe err '+e); } return; }   // wall-B probe: drive LoadTexts directly
             if(t[0]==='archiveinject'){ try{ var ex=resolveExport('cybermodman_archiveInjectName'); if(!ex||ex.isNull()){ log('archiveinject: cybermodman_archiveInjectName export NOT FOUND'); return; } new NativeFunction(ex,'void',[])(); log('archiveinject: cybermodman_archiveInjectName() called - check ArchiveXL.log'); }catch(e){ log('archiveinject err '+e); } return; }   // wall-B exp: overwrite live onscreens text
             if(t[0]==='archivehookname'){ try{ var ex=resolveExport('cybermodman_archiveHookName'); if(!ex||ex.isNull()){ log('archivehookname: cybermodman_archiveHookName export NOT FOUND'); return; } new NativeFunction(ex,'void',[])(); log('archivehookname: cybermodman_archiveHookName() called - check ArchiveXL.log'); }catch(e){ log('archivehookname err '+e); } return; }   // wall-B exp: hook item display-name resolver
-            if(t[0]==='archivename'){ try{ if(nameHookInstalled){ log('archivename: already installed'); return; } var naddr=base.add(0x378a4b8); var ncalls=0; Interceptor.attach(naddr,{ onEnter:function(a){ this.sret=this.context.x8; }, onLeave:function(r){ try{ var b=this.sret; if(!b||b.isNull()) return; var len=b.add(0x14).readU32(); var heap=(len&0x40000000)!==0; var alen=len&0x3FFFFFFF; var tp=heap?b.readPointer():b; var txt=''; try{ txt=tp.readUtf8String(alen); }catch(e){} if(ncalls<25){ ncalls++; log('namehook #'+ncalls+' x8='+b+' len='+alen+' heap='+heap+' text="'+txt+'"'); } if(txt && txt.indexOf('exington')>=0){ var s='CyberModMan!'; b.writeUtf8String(s); b.add(0x14).writeU32(s.length); b.add(0x18).writePointer(ptr(0)); log('namehook OVERWROTE "'+txt+'" -> '+s); } }catch(e){ log('namehook onLeave err '+e); } } }); nameHookInstalled=true; log('archivename: Frida interceptor attached at '+naddr+' (open inventory, hover a Lexington)'); }catch(e){ log('archivename err '+e); } return; }   // wall-B: DIRECT Frida interceptor on item name resolver (RED4ext plugin hooks dont fire)
+            if(t[0]==='archivename'){ try{ if(!isGame231()){ log('archivename: not ported to game '+getGameVersion()); return; } if(nameHookInstalled){ log('archivename: already installed'); return; } var naddr=base.add(0x378a4b8); var ncalls=0; Interceptor.attach(naddr,{ onEnter:function(a){ this.sret=this.context.x8; }, onLeave:function(r){ try{ var b=this.sret; if(!b||b.isNull()) return; var len=b.add(0x14).readU32(); var heap=(len&0x40000000)!==0; var alen=len&0x3FFFFFFF; var tp=heap?b.readPointer():b; var txt=''; try{ txt=tp.readUtf8String(alen); }catch(e){} if(ncalls<25){ ncalls++; log('namehook #'+ncalls+' x8='+b+' len='+alen+' heap='+heap+' text="'+txt+'"'); } if(txt && txt.indexOf('exington')>=0){ var s='CyberModMan!'; b.writeUtf8String(s); b.add(0x14).writeU32(s.length); b.add(0x18).writePointer(ptr(0)); log('namehook OVERWROTE "'+txt+'" -> '+s); } }catch(e){ log('namehook onLeave err '+e); } } }); nameHookInstalled=true; log('archivename: Frida interceptor attached at '+naddr+' (open inventory, hover a Lexington)'); }catch(e){ log('archivename err '+e); } return; }   // wall-B: DIRECT Frida interceptor on item name resolver (RED4ext plugin hooks dont fire)
             if(t[0]==='observe'){   // live-register an Observe (works pre-game: settings/main-menu controllers fire here)
                 if(t[1]==='off'||t[1]==='clear'){ cmUnobserve(); return; }
                 if(t[1]==='list'){ let parts=[]; for(const k in obsByMethod){ for(let i=0;i<obsByMethod[k].length;i++){ const ob=obsByMethod[k][i]; parts.push(ob.className+'.'+ob.methodName+'('+ob.hits+')'); } } log('observe list ['+obsCount+']: '+(parts.join(', ')||'(none)')); return; }
@@ -1100,11 +1168,11 @@ rpc.exports = {
             else log('clean-exit: exit/_exit not resolved'); }catch(e){ log('clean-exit err: '+e); }
         // The real shutdown crash is in the game's own teardown (a stale hook/trampoline call), which runs
         // AFTER the save is flushed but BEFORE exit(). So when Main() returns (game quitting, save done),
-        // _exit(0) immediately - we never reach the crashing teardown. (Main is at base+0x31e18 on 2.3.1.)
+        // _exit(0) immediately - we never reach the crashing teardown. (Main: base+0x31e18 on 2.3.1, base+0x3249c on 2.5.)
         try{ const xP2=resolveExport('_exit');
             if(xP2){ const _x2=new NativeFunction(xP2,'void',['int']);
-                Interceptor.attach(base.add(0x31e18), { onLeave:function(){ try{ clearFile(CMD); }catch(e){} _x2(0); } });
-                log('shutdown-exit hook installed (Main+0x31e18)'); }
+                Interceptor.attach(base.add(OFF.main), { onLeave:function(){ try{ clearFile(CMD); }catch(e){} _x2(0); } });
+                log('shutdown-exit hook installed (Main+0x'+OFF.main.toString(16)+')'); }
             else log('shutdown-exit: _exit unresolved'); }catch(e){ log('shutdown-exit err: '+e); }
         log('==== MINI-CET v3 (universal call + perks/attrs/relic) ready ====');
         Interceptor.attach(execAddr,{
@@ -1222,6 +1290,7 @@ function cmnPutStr(b, s){
 }
 function cmnInstall(){
     if (cmnAttached) return;
+    if (!isGame231()) { cmnLog('loc-hook skipped: offsets not ported to game '+getGameVersion()); return; }
     var cmnB = getModuleBase();
     if (!cmnB) { cmnLog('module cmnB not found; cannot install'); return; }
     cmnBase = cmnB;
@@ -1281,6 +1350,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 //   NOT wired here (DUMP-ONLY ship); this comment records the contract.
 // ============================================================================
 (function installModFolderLoader(){
+    if(!isGame231()){ try{ console.log('[installModFolderLoader] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var MODDIR_LOG = '/tmp/cp2077_edafcc.log';
     // U4 SAFETY GATE: DUMP-ONLY by default. Do NOT flip to true until the dump
     // in /tmp/cp2077_moddir.log confirms stride 0x38 / basePath@0x08 / scope@0x30.
@@ -1718,6 +1788,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 // replace the return with our _root.ent ResourcePath -> the engine loads the entity -> builds the garment.
 // Both melgardens top_ and bottom_ map to the SAME _root.ent (melgardens_swim_string_root.ent).
 (function installFactoryReseal(){
+    if(!isGame231()){ try{ console.log('[installFactoryReseal] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_factoryindex.log';
     function rlog(s){ try{ var f=new File(LOG,'a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} try{console.log('[FXRESEAL] '+s);}catch(e){} }
     var base; try{base=getModuleBase();}catch(e){base=null;}
@@ -1802,6 +1873,7 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 // with the engine's own ResourcePath::Create (0x21c90a4) from /tmp/cp2077_xl_meshalias.txt ("<template>\t<expanded>"
 // per @dynamic mesh, produced offline by `archdump | _tools/mkmeshalias.py`). ABI-free, general for any dynamic mod.
 (function installMeshRedirect(){
+    if(!isGame231()){ try{ console.log('[installMeshRedirect] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_factoryindex.log';
     function mlog(s){ try{ var f=new File(LOG,'a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} try{console.log('[MESHRDR] '+s);}catch(e){} }
     var base; try{base=getModuleBase();}catch(e){base=null;}
@@ -1900,6 +1972,7 @@ var CET_OWNS_GARMENT = true;   // true = gadget owns the appearance path (bikini
 try { File.readAllText('/tmp/cp2077_red4ext_owns_garment'); CET_OWNS_GARMENT = false; } catch(e) {}
 try { console.log('[GARMENT-OWNER] ' + (CET_OWNS_GARMENT ? 'CET gadget (bikini literal)' : 'RED4ext manual hooks (@dynamic)')); } catch(e) {}
 (function installAppearanceProbe(){
+    if(!isGame231()){ try{ console.log('[installAppearanceProbe] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     if(!CET_OWNS_GARMENT){ try{console.log('[APPRPROBE] disabled (RED4ext owns the appearance path)');}catch(e){} return; }
     var LOG='/tmp/cp2077_appearance.log';
     function alog(s){ try{var f=new File(LOG,'a');f.write(s+'\n');f.flush();f.close();}catch(e){} try{console.log('[APPRPROBE] '+s);}catch(e){} }
@@ -1989,6 +2062,7 @@ try { console.log('[GARMENT-OWNER] ' + (CET_OWNS_GARMENT ? 'CET gadget (bikini l
 // "keeps loading forever")? Resource-cache lookup FUN_1021b4d58(x0, x1=ResourcePath) @0x21b4d58; request state
 // machine FUN_1036e783c(x0=req) @0x36e783c, state at req+0x108 (stuck at 2 == loading forever, 3 == FindAppearance runs).
 (function installStreamProbe(){
+    if(!isGame231()){ try{ console.log('[installStreamProbe] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     if(!CET_OWNS_GARMENT){ try{console.log('[STREAM] disabled (RED4ext owns the appearance path)');}catch(e){} return; }
     var LOG='/tmp/cp2077_stream.log';
     function slog(s){ try{var f=new File(LOG,'a');f.write(s+'\n');f.flush();f.close();}catch(e){} try{console.log('[STREAM] '+s);}catch(e){} }
@@ -2045,6 +2119,7 @@ function g_detachFinalizeHooks() {
 }
 
 (function installNativeReg(){
+    if(!isGame231()){ try{ console.log('[installNativeReg] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     function nlog(s){ try{ var f=new File('/tmp/cp2077_redlib.log','a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} }
     try {
         var disabled = false; try { File.readAllText('/tmp/cp2077_no_natreg'); disabled = true; } catch(e){}
@@ -2179,6 +2254,7 @@ function g_detachFinalizeHooks() {
 // /tmp/cp2077_bindfail (create it to enable) so it never runs in normal play. Name resolved only on
 // failure (onLeave), so the thousands of successful resolves cost nothing.
 (function installBindDiag(){
+    if(!isGame231()){ try{ console.log('[installBindDiag] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     function blog(s){ try{ var f=new File('/tmp/cp2077_bindfail.log','a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} }
     try {
         // Gated on a SEPARATE flag now: this validator-hook approach OVER-REPORTS (null return != genuine miss;
@@ -2216,6 +2292,7 @@ function g_detachFinalizeHooks() {
 // diag above OVER-REPORTS (cascade); this captures ONLY the real errors by filtering the FORMAT string (x1) and
 // reading the substituted name (x2). Writes to /tmp/cp2077_bindfmt.log. Gated on /tmp/cp2077_bindfail.
 (function installBindFormatterDiag(){
+    if(!isGame231()){ try{ console.log('[installBindFormatterDiag] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     function flog(s){ try{ var f=new File('/tmp/cp2077_bindfmt.log','a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} }
     try {
         var on=false; try{ File.readAllText('/tmp/cp2077_bindfail'); on=true; }catch(e){}
@@ -2264,6 +2341,7 @@ function g_detachFinalizeHooks() {
 // item, so unlike installBindDiag this does NOT over-report the cascade. The loop visits all items and w23 sums
 // ALL failures before the panic, so one launch enumerates the COMPLETE reject set. Gated on /tmp/cp2077_bindreject.
 (function installBindRejectDiag(){
+    if(!isGame231()){ try{ console.log('[installBindRejectDiag] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_bindreject.log';
     function wlog(s){ try{ var f=new File(LOG,'a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} try{console.log('[BIND-REJECT] '+s);}catch(e){} }
     try {
@@ -2294,6 +2372,7 @@ function g_detachFinalizeHooks() {
 // (a FUNCTION ENTRY - safe, unlike a loop-instruction hook), resolve collector->vtable[2] at runtime, and attach a
 // logger to it. Each call logs the FULLY-FORMATTED error (class/member names substituted). Gated /tmp/cp2077_binderr.
 (function installBindErrorCapture(){
+    if(!isGame231()){ try{ console.log('[installBindErrorCapture] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_binderr.log';
     function elog(s){ try{ var f=new File(LOG,'a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} }
     try {
@@ -2340,6 +2419,7 @@ function g_detachFinalizeHooks() {
 // ScriptableService (and callbacks registered from OnLoad) silently does nothing.
 // Escape hatch: touch /tmp/cp2077_no_svcinit
 (function(){
+    if(!isGame231()) return;   // 2.3.1-only offsets
     // Self-contained logger: nlog/elog are function-scoped inside their own IIFEs and NOT visible here.
     // Referencing them killed the whole script at gadget load (ReferenceError), which took the BIND-PATCH
     // below down with it -> 3510 validation failures -> binder formatter crash. Never share loggers across
@@ -2388,6 +2468,7 @@ function g_detachFinalizeHooks() {
 // build 5314028: (A) 0x21fc754 tbz w0,#0,0x1021fc7dc -> b 0x1021fc83c ; (B) 0x21fc98c tbz w8,#0,0x1021fc9f4 ->
 // b 0x1021fc9f4 ; (C) 0x21fcb80 tbnz w0,#0,0x1021fcc14 -> b 0x1021fcc14. b = 0x14000000 | ((tgt-pc)>>2).
 (function installBindPatch(){
+    if(!isGame231()){ try{ console.log('[installBindPatch] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_bindpatch.log';
     function plog(s){ try{ var f=new File(LOG,'a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} try{console.log('[BIND-PATCH] '+s);}catch(e){} }
     try {
@@ -2456,6 +2537,7 @@ function g_detachFinalizeHooks() {
 // unk118 and both walks survive. dfb4 gets a belt-and-suspenders unk118 compact. The log names the exact
 // class+prop for the durable source fix. Gated on /tmp/cp2077_finaldiag; logs to /tmp/cp2077_finaldiag.log.
 (function installFinalizeFix(){
+    if(!isGame231()){ try{ console.log('[installFinalizeFix] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     function flog(s){ try{ var f=new File('/tmp/cp2077_finaldiag.log','a'); f.write(s+'\n'); f.flush(); f.close(); }catch(e){} }
     try {
         // The bug-#1 preserve fix runs whenever Codeware is active (/tmp/cp2077_codeware_real); the verbose
@@ -2706,6 +2788,7 @@ function g_detachFinalizeHooks() {
 // Appends to /tmp/cp2077_vaspawn.log with ISO timestamps. Rate-capped: first 400 events per hook,
 // then 1-in-50 sampling, so SpawnFromLocal cannot flood the log or tank frame time on IO.
 (function installSpawnProbe(){
+    if(!isGame231()){ try{ console.log('[installSpawnProbe] skipped: offsets not ported to game '+getGameVersion()); }catch(e){} return; }
     var LOG='/tmp/cp2077_vaspawn.log';
     function ts(){ try{ return new Date().toISOString(); }catch(e){ return '?'; } }
     function vlog(s){ try{ var f=new File(LOG,'a'); f.write(ts()+' '+s+'\n'); f.flush(); f.close(); }catch(e){} try{ console.log('[VASPAWN] '+s); }catch(e2){} }

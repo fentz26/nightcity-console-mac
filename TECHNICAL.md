@@ -76,6 +76,26 @@ The RTTI registry vtable exposes `GetClass` at vtbl+0x10, `GetFunction` at vtbl+
 
 A subtle but important distinction: RTTI method/class lookups use FNV-1a 64-bit, while TweakDB flat-key hashing uses CRC32. Conflating the two silently resolves the wrong entries.
 
+### Game 2.5 (3.0.88.46235)
+
+The runtime detects the game version at startup (by the code bytes of the 2.5 `CRTTISystem::Get`) and picks an offset set; see `GAME_OFFSETS` in `runtime/red4ext_hooks.js` and `nccOffsets()` in `overlay/overlay.mm`. The 2.5 values were re-derived from the 2.5 binary:
+
+| Symbol / purpose | 2.3.1 | 2.5 |
+|---|---|---|
+| Universal script executor `(func, context, frame, result, resultType)` | `module_base + 0x2173120` | `module_base + 0x1099fbc` |
+| `CRTTISystem::Get` (singleton getter) | `module_base + 0x2188e8c` | `module_base + 0x10b3cac` |
+| `Main` (clean-shutdown hook) | `module_base + 0x31e18` | `module_base + 0x3249c` |
+| Opcode handler table | `module_base + 0x908b798` | `module_base + 0x9a5c940` |
+| `CScriptStackFrame` destructor | n/a | `module_base + 0x11ab310` |
+| PoolScript allocator (frame call map) | n/a | `module_base + 0x7cddb78` |
+
+The executor was found through the FinalFunc opcode handler (table entry 0x24), which calls it with the same five arguments as before. Two layout changes from 2.5 matter here (they match the RED4ext.SDK 2.5 update):
+
+- `CScriptStackFrame` grew from 0x68 to 0xA8. A root frame owns a call map at +0x68 and points +0x98 at it; child frames copy the parent's +0x98. The executor builds its child frame from the caller frame it is given, so a hand-built caller frame must be 0xA8 bytes and initialized like the engine's own constructor does (isRoot at +0x64, the map's -1 marker at +0x88, the PoolScript allocator at +0x90, +0x98 = frame + 0x68), then destroyed with the frame destructor after the call. A 0x90-byte frame without this makes the engine read past the end of it.
+- Function objects grew by 0x40 bytes after `unkAC` (`CClassFunction` is now 0x100, `parent` at +0xF0). The fields used here (names at +0x08/+0x10, return type at +0x18, params at +0x28/+0x30) did not move, and `CClass` function arrays are still at +0x48/+0x58. The `IRTTISystem` slots used here (`GetClass` +0x10, `GetEnum` +0x18) are unchanged; 2.5 added four virtuals before the destructor.
+
+Not yet ported to 2.5: the RED4ext-style `CONFIG.hooks` other than `Main`, and every mod-loading hook (loose-archive loader, factory/mesh hooks, localization hook, native registration and bind diagnostics). They check `isGame231()` and skip themselves on other versions instead of attaching to unrelated code.
+
 ## 4. Calling a game function
 
 REDengine's native script handlers read their arguments from bytecode in a `CScriptStackFrame`. To call a function from outside the script VM, that frame is constructed by hand:

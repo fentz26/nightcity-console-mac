@@ -159,7 +159,7 @@ typedef void*    (*NccGetClassFn)(void* reg, uint64_t nameHash);
 
 static uint64_t nccFnv1a64(const char* s){ uint64_t h=0xCBF29CE484222325ULL; for(;*s;++s){ h^=(uint64_t)(uint8_t)*s; h*=0x100000001b3ULL; } return h; }
 
-// Main game executable load address (the MH_EXECUTE image). Offsets like 0x2173120 add to this.
+// Main game executable load address (the MH_EXECUTE image). Offsets from nccOffsets() add to this.
 // Selecting by Mach-O filetype (not a fixed dyld index) is the robust form of the old index bug.
 static uintptr_t nccGameBase(){
     static uintptr_t base = 0;
@@ -172,11 +172,46 @@ static uintptr_t nccGameBase(){
     return base;
 }
 
+// Per-game-version offsets (mirror GAME_OFFSETS in runtime/red4ext_hooks.js). 2.5 is detected by the
+// code bytes of its CRTTISystem::Get; anything else falls back to the original 2.3.1 values.
+struct NccOffsets { uintptr_t exec, rttiGet, frameDtor, poolScriptAllocator; };
+static const NccOffsets NCC_OFFSETS_231 = { 0x2173120, 0x2188e8c, 0, 0 };
+static const NccOffsets NCC_OFFSETS_25  = { 0x1099fbc, 0x10b3cac, 0x11ab310, 0x7cddb78 };
+static const NccOffsets& nccOffsets(){
+    static const NccOffsets* off = nullptr;
+    if (off) return *off;
+    static const uint8_t rttiGet25[16] = { 0xfd,0x7b,0xbf,0xa9,0xfd,0x03,0x00,0x91,0x08,0x7d,0x03,0xd0,0x08,0x01,0x3a,0x91 };
+    uintptr_t base = nccGameBase();
+    off = (base && memcmp((const void*)(base + NCC_OFFSETS_25.rttiGet), rttiGet25, 16) == 0) ? &NCC_OFFSETS_25 : &NCC_OFFSETS_231;
+    return *off;
+}
+// Caller frame for the executor (code +0x00, locals +0x10/+0x18, ctx +0x40). 2.5 grew CScriptStackFrame
+// to 0xA8 and child frames inherit the root's call map through +0x98, so set that up like the engine does.
+static uint8_t* nccNewFrame(void* code, void* locals, void* ctx){
+    uint8_t* frame = (uint8_t*)calloc(1, 0xA8);
+    if (!frame) return nullptr;
+    *(void**)(frame+0x00)=code; *(void**)(frame+0x10)=locals; *(void**)(frame+0x18)=locals; *(void**)(frame+0x40)=ctx;
+    const NccOffsets& off = nccOffsets();
+    if (off.poolScriptAllocator){
+        frame[0x64] = 1;                                                       // isRoot
+        *(uint32_t*)(frame+0x88) = 0xFFFFFFFFu;
+        *(uintptr_t*)(frame+0x90) = nccGameBase() + off.poolScriptAllocator;
+        *(void**)(frame+0x98) = frame + 0x68;
+    }
+    return frame;
+}
+static void nccFreeFrame(uint8_t* frame){
+    if (!frame) return;
+    const NccOffsets& off = nccOffsets();
+    if (off.frameDtor) ((void (*)(void*))(nccGameBase() + off.frameDtor))(frame);
+    free(frame);
+}
+
 static void* g_nccReg = nullptr; static NccGetClassFn g_nccGetClass = nullptr;
 static void nccEnsureReg(){
     if (g_nccReg) return;
     uintptr_t base = nccGameBase(); if (!base) return;
-    NccRegGetter getter = (NccRegGetter)(base + 0x2188e8c);   // CRTTISystem::Get
+    NccRegGetter getter = (NccRegGetter)(base + nccOffsets().rttiGet);   // CRTTISystem::Get
     g_nccReg = getter(); if (!g_nccReg) return;
     void* vt = *(void**)g_nccReg;                              // registry vtable
     g_nccGetClass = *(NccGetClassFn*)((uintptr_t)vt + 0x10);   // GetClass @ vt+0x10
@@ -217,16 +252,15 @@ static void nccHexDump(const char* label, const void* p, int n){
 // Heap-allocated (16-byte aligned, like Frida Memory.alloc) to match the working hooks.js path.
 // Returns the executor's own return code (for diagnostics).
 static uint64_t nccCallNoArg(void* fn, void* ctx, void* retType, uint8_t* result16){
-    NccExecFn Exec = (NccExecFn)(nccGameBase() + 0x2173120);
+    NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     uint8_t* bc = (uint8_t*)calloc(1, 64); if(bc) bc[0]=0x26;  // ParamEnd
     uint8_t* locals = (uint8_t*)calloc(1, 0x40);
-    uint8_t* frame  = (uint8_t*)calloc(1, 0x90);
-    if(frame){ *(void**)(frame+0x00)=bc; *(void**)(frame+0x10)=locals; *(void**)(frame+0x18)=locals; *(void**)(frame+0x40)=ctx; }
+    uint8_t* frame  = nccNewFrame(bc, locals, ctx);
     memset(result16,0,16);
     uint64_t rc = Exec(fn, ctx, frame, result16, retType);
     nccHexDump("  locals[0:0x20] post", locals, 0x20);
     nccHexDump("  frame[0:0x20] post", frame, 0x20);
-    free(bc); free(locals); free(frame);
+    free(bc); free(locals); nccFreeFrame(frame);
     return rc;
 }
 // Fetch a LIVE player handle via the Q7 bridge right before a native call (avoids the stale-handle gap).
@@ -264,7 +298,7 @@ static uint64_t nccTypeName(void* type){ if(!type) return 0; void* vt=*(void**)t
 // parsed by the param type. result16 = 16-byte out buffer. Returns the executor rc; on a marshalling
 // error returns 0 and fills *err. gameItemID (T_ITEM) is not yet ported (still goes via the bridge).
 static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, uint8_t* result16, std::string* err){
-    NccExecFn Exec = (NccExecFn)(nccGameBase() + 0x2173120);
+    NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     void* pEntries = *(void**)((uintptr_t)f->fn + 0x28);
     uint32_t pCount = *(uint32_t*)((uintptr_t)f->fn + 0x30);
     uint8_t* locals = (uint8_t*)calloc(1, 0x40 + (size_t)argc*0x20);
@@ -300,11 +334,10 @@ static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, 
     }
     uint8_t* bc = (uint8_t*)calloc(1, 16 + (size_t)argc*9);
     size_t o=0; for(int i=0;i<argc;i++){ bc[o++]=0x18; *(void**)(bc+o)=props[i]; o+=8; } bc[o]=0x26; // ParamEnd
-    uint8_t* frame = (uint8_t*)calloc(1, 0x90);
-    *(void**)(frame+0x00)=bc; *(void**)(frame+0x10)=locals; *(void**)(frame+0x18)=locals; *(void**)(frame+0x40)=ctx;
+    uint8_t* frame = nccNewFrame(bc, locals, ctx);
     memset(result16,0,16);
     uint64_t rc = Exec(f->fn, ctx, frame, result16, f->retType);
-    for(void* cp:props) free(cp); free(bc); free(locals); free(frame);
+    for(void* cp:props) free(cp); free(bc); free(locals); nccFreeFrame(frame);
     return rc;
 }
 
@@ -314,7 +347,7 @@ static uint64_t nccCall(const NccFn* f, void* ctx, int argc, const char** argv, 
 enum { NCC_HANDLE, NCC_RAW, NCC_I32, NCC_U64 };
 struct NccItem { int kind; void* inst; const void* raw; int n; uint64_t v; };
 static uint64_t nccCallRaw(const NccFn* f, void* ctx, const std::vector<NccItem>& items, uint8_t* result16){
-    NccExecFn Exec = (NccExecFn)(nccGameBase() + 0x2173120);
+    NccExecFn Exec = (NccExecFn)(nccGameBase() + nccOffsets().exec);
     void* pEntries = *(void**)((uintptr_t)f->fn + 0x28);
     uint8_t* locals = (uint8_t*)calloc(1, 0x40 + items.size()*0x20);
     std::vector<void*> props;
@@ -331,11 +364,10 @@ static uint64_t nccCallRaw(const NccFn* f, void* ctx, const std::vector<NccItem>
     }
     uint8_t* bc = (uint8_t*)calloc(1, 16 + items.size()*9);
     size_t o=0; for(size_t i=0;i<items.size();i++){ bc[o++]=0x18; *(void**)(bc+o)=props[i]; o+=8; } bc[o]=0x26;
-    uint8_t* frame = (uint8_t*)calloc(1, 0x90);
-    *(void**)(frame+0x00)=bc; *(void**)(frame+0x10)=locals; *(void**)(frame+0x18)=locals; *(void**)(frame+0x40)=ctx;
+    uint8_t* frame = nccNewFrame(bc, locals, ctx);
     memset(result16,0,16);
     uint64_t rc = Exec(f->fn, ctx, frame, result16, f->retType);
-    for(void* cp:props) free(cp); free(bc); free(locals); free(frame);
+    for(void* cp:props) free(cp); free(bc); free(locals); nccFreeFrame(frame);
     return rc;
 }
 static bool nccSane(void* p){ uintptr_t v=(uintptr_t)p; return v>0x10000ULL && v<0x800000000000ULL; }

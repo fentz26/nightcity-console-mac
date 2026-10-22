@@ -1,7 +1,7 @@
 # NightCity Console for Mac
 
 ![macOS arm64](https://img.shields.io/badge/macOS-arm64-black)
-![Cyberpunk 2077](https://img.shields.io/badge/Cyberpunk%202077-2.3.1-yellow)
+![Cyberpunk 2077](https://img.shields.io/badge/Cyberpunk%202077-2.3.1%20%7C%202.5-yellow)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-Steam%20supported-green)
 
@@ -30,7 +30,7 @@ A native Apple Silicon in-game console, cheat menu, and item browser for Cyberpu
 
 ## Status
 
-macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
+macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). The core console (commands, item spawning, cheats, overlay) also runs on v2.5 (Steam); the experimental mod-loading hooks (loose archives, TweakXL/ArchiveXL integration) are not ported to 2.5 yet and switch themselves off there. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
 
 ## What it does
 
@@ -51,7 +51,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command list and known lim
 
 - Apple Silicon Mac (arm64). Intel is not supported.
 - macOS 26 or newer; tested on macOS 26 and 27.
-- Cyberpunk 2077 v2.3.1, macOS, Steam build.
+- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, mod loading is not available yet).
 - A legally-owned copy of the game. No CD PROJEKT RED files are distributed by this project.
 
 ## Install and usage (players)
@@ -118,7 +118,7 @@ For the full reverse-engineering and architecture write-up (offsets, struct layo
 ## Compatibility and caveats
 
 - Steam version only right now. The offsets come from the Steam macOS build; the GOG build differs, so it is not supported yet. GOG support is in progress.
-- Built against v2.3.1. Game updates can move offsets and break it. Releases are tagged per supported game version.
+- Built against v2.3.1, with the core console ported to v2.5 (the game version is detected at startup). Game updates can move offsets and break it. Releases are tagged per supported game version.
 - Single-player only. Modding can corrupt saves, so keep backups.
 - Install re-signs the game binary (ad-hoc) so the console can load. This is reversible at any time via Steam's "Verify Integrity of Game Files".
 - macOS arm64 only.

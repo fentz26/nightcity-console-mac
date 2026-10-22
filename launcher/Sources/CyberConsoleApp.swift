@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 enum Const {
     static let appVersion = "1.5.0"
-    static let supportedGameVersion = "2.3.1"
+    static let supportedGameVersions = ["2.3.1", "2.5.0"]   // 2.5: core console only, mod loading not ported yet
     static let defaultGame = "\(NSHomeDirectory())/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077"
     // Files copied from the app's Resources into <game>/red4ext/ on install. config.ini is REQUIRED - RED4ext
     // reads [plugins] enabled=true from it; without it no plugins load. cyberpunk2077_addresses.json is its
@@ -670,7 +670,7 @@ struct ContentView: View {
 
     var versionMismatch: Bool {
         guard let v = m.gameVersion else { return false }
-        return m.gameFound && v != Const.supportedGameVersion
+        return m.gameFound && !Const.supportedGameVersions.contains(v)
     }
 
     // Steam installs always live under a "steamapps" path; anything else (e.g. GOG) is not supported yet.
@@ -720,7 +720,7 @@ struct ContentView: View {
             }
 
             if versionMismatch, let v = m.gameVersion {
-                Label("Detected game v\(v); NightCity Console targets v\(Const.supportedGameVersion). It may not work.",
+                Label("Detected game v\(v); NightCity Console targets v\(Const.supportedGameVersions.joined(separator: " / v")). It may not work.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundColor(.orange)
             }
