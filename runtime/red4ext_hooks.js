@@ -1419,6 +1419,28 @@ try { cmnLog('=== cybermodman custom-names init ==='); cmnLoad(); cmnInstall(); 
 //   and feed each path to the per-file loader near base+0x3edb0a4. That path is
 //   NOT wired here (DUMP-ONLY ship); this comment records the contract.
 // ============================================================================
+// ===== 2.5: archive/Mac/mod boot-crash guard =====
+// 2.5 loads archive/Mac/mod itself (official mod support), and loose .archive mods there work. When an archive in
+// that folder cannot be read - typically a "._x.archive" AppleDouble sidecar macOS writes on exFAT drives - the
+// depot loader asks gamemod::GameModService (method base+0x1d17f28, void(this, x1, x2); vtable +0x1a8) to show
+// "UI-Modio-ErrorMessages-Reloading". That message is built through the ink UI singleton (base+0x8ece4d0), which
+// does not exist yet during startup on macOS, so the stock game crashes. The launcher removes sidecars before launch;
+// as a safety net the method is replaced by a wrapper that skips it while the UI singleton is null.
+(function installModArchiveBootGuard(){
+    if(getGameVersion()!=='2.5') return;
+    try{
+        var base=getModuleBase();
+        var target=base.add(0x1d17f28), uiSingleton=base.add(0x8ece4d0);
+        // Expect the 2.5 prologue: sub sp,sp,#0xb0; stp x20,x19,[sp,#0x90]; stp x29,x30,[sp,#0xa0].
+        if(target.readU32()!==0xd102c3ff || target.add(4).readU32()!==0xa9094ff4){ console.log('[MODGUARD] method not recognized; guard not installed'); return; }
+        var original=new NativeFunction(target, 'void', ['pointer', 'pointer', 'pointer']);
+        Interceptor.replace(target, new NativeCallback(function(self, a, b){
+            if(!uiSingleton.readPointer().isNull()) original(self, a, b);
+        }, 'void', ['pointer', 'pointer', 'pointer']));
+        console.log('[MODGUARD] installed at '+target);
+    }catch(e){ try{ console.log('[MODGUARD] install err '+e); }catch(_){} }
+})();
+
 (function installModFolderLoader(){
     // 2.3.1 only. On 2.5 the game scans archive/Mac/mod itself and crashes at startup on any .archive there
     // (reproduced without NightCity loaded), so registering the folder again is not done there.

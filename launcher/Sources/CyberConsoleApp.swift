@@ -119,6 +119,7 @@ final class Model: ObservableObject {
     // MUST be called off the main thread.
     private func compileScripts() -> String? {
         let scriptsDir = "\(gamePath)/r6/scripts"
+        stripAppleDoubles(scriptsDir)   // scc reads "._x.reds" sidecars as sources and stops ("Could not load script sources")
         // Removing the last script mod may leave the dir empty/missing; compiling an empty dir is how
         // the cache gets restored to base-only, so make sure the dir exists rather than skipping.
         try? FileManager.default.createDirectory(atPath: scriptsDir, withIntermediateDirectories: true)
@@ -498,6 +499,12 @@ final class Model: ObservableObject {
 
     private func launchGame() {
         ensureSteam()
+        // On non-Apple volumes (exFAT/FAT) macOS writes "._name" AppleDouble sidecars next to every file. The game's
+        // own *.archive scan of archive/Mac/mod picks a "._x.archive" up, fails to read it and crashes at startup
+        // (2.5); scc and TweakXL likewise read sidecars as sources. Remove them from the folders the game reads.
+        for dir in ["archive/Mac/mod", "r6/scripts", "r6/tweaks"] where FileManager.default.fileExists(atPath: "\(gamePath)/\(dir)") {
+            stripAppleDoubles("\(gamePath)/\(dir)")
+        }
         // ALWAYS restore the macOS compatibility-layer enable-flags before launch. These live in /tmp and are
         // purged by macOS's periodic tmp-reaper (files unaccessed for ~3 days) even without a reboot. `regen`
         // recreates them, but it only runs when /tmp/cp2077_xl_items.txt is missing - so if the reaper purges
@@ -659,9 +666,6 @@ final class Model: ObservableObject {
         guard gameFound else { status = "Game not found."; return }
         guard fullyInstalled() else { status = "Install NightCity Console first, then add mods."; return }
         guard nctoolPath() != nil else { status = "nctool helper missing from the app bundle."; return }
-        // On 2.5 the game itself scans archive/Mac/mod at startup and crashes on any .archive placed there
-        // (reproduced without NightCity loaded), so installing mods would leave the game unable to start.
-        guard pluginsSupported else { status = "Mods can't be installed on game \(gameVersion ?? "this version") yet: the game crashes at startup on any .archive in archive/Mac/mod (happens without NightCity too)."; return }
         guard !busy else { status = "Please wait for the current mod to finish installing."; return }
         let base = url.deletingPathExtension().lastPathComponent
         busy = true; progress = 0; busyDetail = "Reading \(base)…"; status = "Installing \(base)…"
