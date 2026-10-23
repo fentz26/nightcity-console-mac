@@ -45,6 +45,7 @@ fi
 # Native macOS RED4ext + TweakXL + ArchiveXL for game 2.5 (optional). NATIVE25_DIR is a red4ext folder laid
 # out as the game uses it: RED4ext.dylib, bin/red4ext_plugin_check, bin/x64/cyberpunk2077_addresses.json and
 # plugins/<Name>/{<Name>.dylib, Scripts/, Data/}. Without it the app installs only the console on 2.5.
+# Sources: branch game-2.5 of fentz26/RED4ext-macos, RED4ext.SDK-macos, cp2077-tweak-xl-macos, cp2077-archive-xl-macos.
 if [ -n "${NATIVE25_DIR:-}" ]; then
   [ -f "$NATIVE25_DIR/RED4ext.dylib" ] || { echo "  NATIVE25_DIR has no RED4ext.dylib: $NATIVE25_DIR"; exit 1; }
   rm -rf deps/native25
