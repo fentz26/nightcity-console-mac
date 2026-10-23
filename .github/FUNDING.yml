@@ -1,1 +1,6 @@
-custom: ["https://ko-fi.com/ysrdevs", "https://ko-fi.com/fentz26"]
+custom:
+  # ysrdevs
+  - https://ko-fi.com/ysrdevs
+
+  # fentz26
+  - https://ko-fi.com/fentz26
