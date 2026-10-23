@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import CryptoKit
 
 enum Const {
     static let appVersion = "1.5.0"
@@ -255,9 +256,7 @@ final class Model: ObservableObject {
         var leftInPlace: [String] = []
         for u in units231(res) where fm.fileExists(atPath: "\(red4Dir)/\(u.key)") {
             // NightCity's own 2.5 build of the same plugin is in place: nothing of 2.3.1 to park, nothing to report.
-            if let n = native25Root(), fm.contentsEqual(atPath: "\(red4Dir)/\(u.key)", andPath: n.appendingPathComponent(u.key).path) {
-                continue
-            }
+            if isOurNative25(u.key) { continue }
             guard let keyFile = u.files.first(where: { $0.rel == u.key }),
                   fm.contentsEqual(atPath: "\(red4Dir)/\(u.key)", andPath: keyFile.bundled.path)
             else { leftInPlace.append(u.name); continue }
@@ -309,24 +308,52 @@ final class Model: ObservableObject {
             let scripts = "\(red4Dir)/plugins/\(name)/Scripts"
             if fm.fileExists(atPath: scripts) { try fm.removeItem(atPath: scripts) }
         }
+        var manifest = ""
         for rel in native25Files(root) {
             let dst = "\(red4Dir)/\(rel)"
             try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
             if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }
             try fm.copyItem(at: root.appendingPathComponent(rel), to: URL(fileURLWithPath: dst))
+            if let h = sha256(dst) { manifest += "\(h)  \(rel)\n" }
         }
+        try manifest.write(toFile: native25Manifest, atomically: true, encoding: .utf8)
     }
-    // Off 2.5: delete the native25 files NightCity installed (only those byte-identical to the bundled copy; they
-    // come back from the bundle on 2.5) and the staged plugin scripts, whose natives no other loader registers.
+    // What installNative25 wrote ("<sha256>  <red4ext-relative path>" per line), so files from an earlier app
+    // version - which differ from the current bundle - are still recognised as NightCity's.
+    var native25Manifest: String { "\(red4Dir)/nightcity-native25.txt" }
+    func sha256(_ path: String) -> String? {
+        guard let d = FileManager.default.contents(atPath: path) else { return nil }
+        return SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+    }
+    func native25Installed() -> [String: String] {
+        var out: [String: String] = [:]
+        for line in ((try? String(contentsOfFile: native25Manifest, encoding: .utf8)) ?? "").split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            if parts.count == 2 { out[parts[1].trimmingCharacters(in: .whitespaces)] = String(parts[0]) }
+        }
+        return out
+    }
+    // True when red4ext/<rel> is a native25 file NightCity installed: identical to the bundled copy, or unchanged
+    // since an earlier install recorded it.
+    func isOurNative25(_ rel: String) -> Bool {
+        let fm = FileManager.default, p = "\(red4Dir)/\(rel)"
+        guard fm.fileExists(atPath: p) else { return false }
+        if let root = native25Root(), fm.contentsEqual(atPath: p, andPath: root.appendingPathComponent(rel).path) { return true }
+        if let h = native25Installed()[rel] { return sha256(p) == h }
+        return false
+    }
+    // Off 2.5: delete the native25 files NightCity installed (they come back from the bundle on 2.5) and the
+    // staged plugin scripts, whose natives no other loader registers. Files the player changed stay.
     func removeNative25Files() throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: pluginScriptsStage) { try fm.removeItem(atPath: pluginScriptsStage) }
-        guard let root = native25Root() else { return }
-        for rel in native25Files(root) where fm.contentsEqual(atPath: "\(red4Dir)/\(rel)", andPath: root.appendingPathComponent(rel).path) {
+        let rels = Set((native25Root().map { native25Files($0) } ?? []) + Array(native25Installed().keys))
+        for rel in rels where isOurNative25(rel) {
             try fm.removeItem(atPath: "\(red4Dir)/\(rel)")
         }
+        if fm.fileExists(atPath: native25Manifest) { try fm.removeItem(atPath: native25Manifest) }
         // folders the tree created that are empty now (deepest first)
-        let dirs = Set(native25Files(root).flatMap { rel -> [String] in
+        let dirs = Set(rels.flatMap { rel -> [String] in
             var out: [String] = [], d = (rel as NSString).deletingLastPathComponent
             while !d.isEmpty { out.append(d); d = (d as NSString).deletingLastPathComponent }
             return out
