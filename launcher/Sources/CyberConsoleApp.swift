@@ -23,6 +23,7 @@ enum Const {
     static let repo = "ysrdevs/nightcity-console-mac"
     static let commandsURL = "https://github.com/ysrdevs/nightcity-console-mac/blob/main/docs/COMMANDS.md"
     static let supportURL = "https://ko-fi.com/ysrdevs"
+    static let supportURL2 = "https://ko-fi.com/fentz26"   // game 2.5 support
 }
 
 final class Model: ObservableObject {
@@ -997,7 +998,15 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Link("Commands", destination: URL(string: Const.commandsURL)!)
-                Link("♥ Support", destination: URL(string: Const.supportURL)!)
+                Menu {
+                    Button("ysrdevs on Ko-fi") { NSWorkspace.shared.open(URL(string: Const.supportURL)!) }
+                    Button("fentz26 on Ko-fi") { NSWorkspace.shared.open(URL(string: Const.supportURL2)!) }
+                } label: {
+                    Text("♥ Support").foregroundColor(.accentColor)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
             Text("Steam version only for now · GOG support in progress").font(.caption2).foregroundColor(.secondary)
             Text("Single-player only · back up your saves").font(.caption2).foregroundColor(.secondary)
