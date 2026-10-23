@@ -24,12 +24,43 @@ if [ -d "$GAME" ]; then
 fi
 
 # redscript compiler (jac3km4/redscript macOS arm64 release) - bundled so the app can compile .reds
-# script mods into r6/cache/final.redscripts before every launch. Canonical copy lives in the
-# cybermodman repo (extracted redscript-v0.5.31-macos.zip); fall back to the game's deployed copy.
-SCC_SRC="$HOME/cybermodman/redscript/engine/tools"
-[ -f "$SCC_SRC/scc" ] || SCC_SRC="${CP2077_DIR:-$HOME/Library/Application Support/Steam/steamapps/common/Cyberpunk 2077}/engine/tools"
-copy_if "$SCC_SRC/scc"
-copy_if "$SCC_SRC/libscc_lib.dylib"
+# script mods into r6/cache/final.redscripts before every launch. Pinned to v0.5.32: 0.5.31 cannot read
+# the script bundle of game 2.5; 0.5.32 only adds reading the 2.5 header, so 2.3.1 bundles are unchanged.
+RS_VER=v0.5.32
+RS_ZIP_SHA=b9df6cc0144d786dff9590eb6db913d20744055ab694e52fc8c4584eaee39a8a
+SCC_SHA=a3b9f6216c66ff6674332e52ce828f3d9930f7c7f210731eb1910ac6d2bf95a3
+if [ "$(shasum -a 256 deps/scc 2>/dev/null | cut -d' ' -f1)" != "$SCC_SHA" ]; then
+  TMP="$(mktemp -d)"
+  if curl -fsSL -o "$TMP/rs.zip" "https://github.com/jac3km4/redscript/releases/download/$RS_VER/redscript-$RS_VER-macos.zip" \
+     && [ "$(shasum -a 256 "$TMP/rs.zip" | cut -d' ' -f1)" = "$RS_ZIP_SHA" ]; then
+    unzip -qo "$TMP/rs.zip" -d "$TMP/x"
+    cp "$TMP/x/engine/tools/scc" "$TMP/x/engine/tools/libscc_lib.dylib" deps/
+    echo "  got redscript $RS_VER (scc + libscc_lib.dylib)"
+  else
+    echo "  [warn] could not download redscript $RS_VER (or its checksum did not match)"
+  fi
+  rm -rf "$TMP"
+fi
+
+# Native macOS RED4ext + TweakXL + ArchiveXL for game 2.5 (optional). NATIVE25_DIR is a red4ext folder laid
+# out as the game uses it: RED4ext.dylib, bin/red4ext_plugin_check, bin/x64/cyberpunk2077_addresses.json and
+# plugins/<Name>/{<Name>.dylib, Scripts/, Data/}. Without it the app installs only the console on 2.5.
+if [ -n "${NATIVE25_DIR:-}" ]; then
+  [ -f "$NATIVE25_DIR/RED4ext.dylib" ] || { echo "  NATIVE25_DIR has no RED4ext.dylib: $NATIVE25_DIR"; exit 1; }
+  rm -rf deps/native25
+  mkdir -p deps/native25/bin/x64 deps/native25/plugins
+  cp "$NATIVE25_DIR/RED4ext.dylib" deps/native25/
+  cp "$NATIVE25_DIR/bin/red4ext_plugin_check" deps/native25/bin/
+  cp "$NATIVE25_DIR/bin/x64/cyberpunk2077_addresses.json" deps/native25/bin/x64/
+  for p in TweakXL ArchiveXL; do
+    mkdir -p "deps/native25/plugins/$p"
+    cp "$NATIVE25_DIR/plugins/$p/$p.dylib" "deps/native25/plugins/$p/"
+    for d in Scripts Data; do
+      [ -d "$NATIVE25_DIR/plugins/$p/$d" ] && rsync -a --exclude '._*' "$NATIVE25_DIR/plugins/$p/$d" "deps/native25/plugins/$p/"
+    done
+  done
+  echo "  got native 2.5 payload ($(find deps/native25 -type f | wc -l | tr -d ' ') files)"
+fi
 
 MISSING=0
 for f in RED4ext.dylib FridaGadget.dylib TweakXL.dylib ArchiveXL.dylib config.ini scc libscc_lib.dylib; do
@@ -43,6 +74,7 @@ Some deps are missing. Obtain them from upstream and drop into deps/:
   - FridaGadget.dylib : frida-gadget (macOS arm64) from https://github.com/frida/frida/releases
                         (download frida-gadget-<ver>-macos-arm64.dylib.gz, gunzip, rename to FridaGadget.dylib)
   - RED4ext.dylib     : RED4ext macOS port release
+  - (optional) the native 2.5 payload: set NATIVE25_DIR to a red4ext folder with the 2.5 builds (see above)
 Then re-run this script (or just place the files and continue).
 EOF
   exit 1

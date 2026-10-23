@@ -30,7 +30,7 @@ A native Apple Silicon in-game console, cheat menu, and item browser for Cyberpu
 
 ## Status
 
-macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). It also runs on v2.5 (Steam): the console, item spawning (the catalog includes the items new in 2.5), cheats, the overlay and loose `.archive` mods (2.5 loads `archive/Mac/mod` itself; the launcher removes the `._*` files macOS writes on exFAT drives, which the game would otherwise try to load and crash on). The bundled TweakXL/ArchiveXL plugins are 2.3.1 builds, so on 2.5 the launcher leaves them out and mods that need them do not load yet. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
+macOS arm64 (Apple Silicon, M1/M2/M3/M4). Built and verified against Cyberpunk 2077 v2.3.1 (Steam). It also runs on v2.5 (Steam): the console, item spawning (the catalog includes the items new in 2.5), cheats, the overlay and loose `.archive` mods (2.5 loads `archive/Mac/mod` itself; the launcher removes the `._*` files macOS writes on exFAT drives, which the game would otherwise try to load and crash on). On 2.5 the launcher installs the native macOS RED4ext loader with 2.5 builds of TweakXL and ArchiveXL instead of the 2.3.1 ones; the loader only loads plugins whose game addresses are verified for 2.5, so other RED4ext plugins built for 2.3.1 (Codeware and the like) stay unloaded. ArchiveXL runs without its packed resource bundle, which only some of its extensions use. GOG support is in progress. The offsets and hashes are derived from the Steam macOS build, so other distributions are not supported yet.
 
 ## What it does
 
@@ -51,7 +51,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md) for the full command list and known lim
 
 - Apple Silicon Mac (arm64). Intel is not supported.
 - macOS 26 or newer; tested on macOS 26 and 27.
-- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, TweakXL/ArchiveXL mods are not supported yet).
+- Cyberpunk 2077 v2.3.1 or v2.5, macOS, Steam build (on 2.5, RED4ext plugins other than TweakXL/ArchiveXL are not supported yet).
 - A legally-owned copy of the game. No CD PROJEKT RED files are distributed by this project.
 
 ## Install and usage (players)

@@ -60,9 +60,32 @@ final class Model: ObservableObject {
     var red4Dir: String { "\(gamePath)/red4ext" }
     var gameFound: Bool { FileManager.default.fileExists(atPath: binaryPath) }
     // The vendored RED4ext plugins (TweakXL / ArchiveXL), their AddressLib and the gum hook offsets are built
-    // for game 2.3.1. On 2.5 only the console runtime is installed; the plugin path stays off until ported.
+    // for game 2.3.1. Game 2.5 gets its own set instead (native25 below); other versions get the console only.
     var pluginsSupported: Bool { (gameVersion ?? readGameVersion() ?? "2.3.1") == "2.3.1" }
-    var payloadFiles: [String] { Const.payload.filter { pluginsSupported || !Const.payload231Only.contains($0) } }
+    // The native macOS RED4ext loader with its 2.5 address database, plugin checker and config, plus the 2.5
+    // builds of TweakXL / ArchiveXL, bundled as a red4ext-relative tree in Resources/native25. On 2.5 it is
+    // installed in place of the 2.3.1 loader, config and plugins.
+    func native25Root() -> URL? {
+        guard let d = Bundle.main.resourceURL?.appendingPathComponent("native25"),
+              FileManager.default.fileExists(atPath: d.appendingPathComponent("RED4ext.dylib").path) else { return nil }
+        return d
+    }
+    var native25Active: Bool { (gameVersion ?? readGameVersion()) == "2.5.0" && native25Root() != nil }
+    // red4ext-relative paths of every file in the native25 tree.
+    func native25Files(_ root: URL) -> [String] {
+        let fm = FileManager.default
+        return (fm.enumerator(atPath: root.path)?.allObjects as? [String] ?? []).filter { rel in
+            var d: ObjCBool = false
+            return !(rel as NSString).lastPathComponent.hasPrefix(".")
+                && fm.fileExists(atPath: root.appendingPathComponent(rel).path, isDirectory: &d) && !d.boolValue
+        }
+    }
+    var payloadFiles: [String] {
+        Const.payload.filter { f in
+            (pluginsSupported || !Const.payload231Only.contains(f))
+                && !(native25Active && ["RED4ext.dylib", "config.ini"].contains(f))   // native25 brings its own
+        }
+    }
 
     // the three dylibs DYLD_INSERT_LIBRARIES will load (must all exist before launch)
     var injectDylibs: [String] { ["RED4ext.dylib", "FridaGadget.dylib", "libcyberconsole_overlay.dylib"] }
@@ -74,7 +97,10 @@ final class Model: ObservableObject {
         // scc (the redscript compiler) is required only when the app bundle actually ships it, so old
         // installs self-heal via play()'s install() call without bricking dev builds that lack it.
         let scc = sccResourcePath() == nil || fm.fileExists(atPath: sccGamePath)
-        return core && (!pluginsSupported || (tweakXL && archiveXL)) && scc
+        let native = native25Root().map { root in
+            !native25Active || native25Files(root).allSatisfy { fm.contentsEqual(atPath: "\(red4Dir)/\($0)", andPath: root.appendingPathComponent($0).path) }
+        } ?? true
+        return core && (!pluginsSupported || (tweakXL && archiveXL)) && scc && native
     }
 
     // MARK: - redscript (scc) integration
@@ -228,6 +254,10 @@ final class Model: ObservableObject {
         let fm = FileManager.default
         var leftInPlace: [String] = []
         for u in units231(res) where fm.fileExists(atPath: "\(red4Dir)/\(u.key)") {
+            // NightCity's own 2.5 build of the same plugin is in place: nothing of 2.3.1 to park, nothing to report.
+            if let n = native25Root(), fm.contentsEqual(atPath: "\(red4Dir)/\(u.key)", andPath: n.appendingPathComponent(u.key).path) {
+                continue
+            }
             guard let keyFile = u.files.first(where: { $0.rel == u.key }),
                   fm.contentsEqual(atPath: "\(red4Dir)/\(u.key)", andPath: keyFile.bundled.path)
             else { leftInPlace.append(u.name); continue }
@@ -269,13 +299,85 @@ final class Model: ObservableObject {
         if left.isEmpty { try? fm.removeItem(atPath: parkedDir) }
     }
 
+    // MARK: - native 2.5 loader + plugins
+
+    // Copy the native25 tree into red4ext/, file by file. Each plugin's Scripts folder is replaced as a whole so a
+    // script dropped by a newer plugin build cannot linger (its natives would no longer be registered).
+    func installNative25(_ root: URL) throws {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: root.appendingPathComponent("plugins").path)) ?? [] where !name.hasPrefix(".") {
+            let scripts = "\(red4Dir)/plugins/\(name)/Scripts"
+            if fm.fileExists(atPath: scripts) { try fm.removeItem(atPath: scripts) }
+        }
+        for rel in native25Files(root) {
+            let dst = "\(red4Dir)/\(rel)"
+            try fm.createDirectory(atPath: (dst as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }
+            try fm.copyItem(at: root.appendingPathComponent(rel), to: URL(fileURLWithPath: dst))
+        }
+    }
+    // Off 2.5: delete the native25 files NightCity installed (only those byte-identical to the bundled copy; they
+    // come back from the bundle on 2.5) and the staged plugin scripts, whose natives no other loader registers.
+    func removeNative25Files() throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: pluginScriptsStage) { try fm.removeItem(atPath: pluginScriptsStage) }
+        guard let root = native25Root() else { return }
+        for rel in native25Files(root) where fm.contentsEqual(atPath: "\(red4Dir)/\(rel)", andPath: root.appendingPathComponent(rel).path) {
+            try fm.removeItem(atPath: "\(red4Dir)/\(rel)")
+        }
+        // folders the tree created that are empty now (deepest first)
+        let dirs = Set(native25Files(root).flatMap { rel -> [String] in
+            var out: [String] = [], d = (rel as NSString).deletingLastPathComponent
+            while !d.isEmpty { out.append(d); d = (d as NSString).deletingLastPathComponent }
+            return out
+        }).sorted { $0.count > $1.count }
+        for d in dirs {
+            let p = "\(red4Dir)/\(d)"
+            stripAppleDoubles(p)
+            if (try? fm.contentsOfDirectory(atPath: p))?.isEmpty == true { try? fm.removeItem(atPath: p) }
+        }
+    }
+
+    // Plugin scripts (<plugin>/Scripts/*.reds) declare the plugin's native classes and functions; scc compiles
+    // only what is under r6/scripts, so they are staged there before every compile on 2.5. Only plugins the loader
+    // will load are staged: it refuses a plugin that needs an address its database has not verified, and a script
+    // declaring natives nobody registered stops the game at script init. Returns the names of refused plugins.
+    var pluginScriptsStage: String { "\(gamePath)/r6/scripts/zz_nightcity_plugins" }
+    func stageNativePluginScripts() -> [String] {
+        let fm = FileManager.default
+        try? fm.removeItem(atPath: pluginScriptsStage)
+        let check = "\(red4Dir)/bin/red4ext_plugin_check", db = "\(red4Dir)/bin/x64/cyberpunk2077_addresses.json"
+        var refused: [String] = []
+        for name in ((try? fm.contentsOfDirectory(atPath: "\(red4Dir)/plugins")) ?? []).sorted() where !name.hasPrefix(".") {
+            let dir = "\(red4Dir)/plugins/\(name)"
+            let dylibs = ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".dylib") && !$0.hasPrefix(".") }
+            guard !dylibs.isEmpty else { continue }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: check)
+            p.arguments = [db] + dylibs.map { "\(dir)/\($0)" }
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            guard (try? p.run()) != nil else { refused.append(name); continue }
+            p.waitUntilExit()
+            guard p.terminationStatus == 0 else { refused.append(name); continue }
+            if fm.fileExists(atPath: "\(dir)/Scripts") {
+                try? fm.createDirectory(atPath: pluginScriptsStage, withIntermediateDirectories: true)
+                try? fm.copyItem(atPath: "\(dir)/Scripts", toPath: "\(pluginScriptsStage)/\(name)")
+            }
+        }
+        return refused
+    }
+
     func install() {
         guard gameFound else { status = "Game not found."; return }
         guard let res = Bundle.main.resourceURL else { status = "Bundle resources missing."; return }
+        gameVersion = readGameVersion()   // the game may have been updated since the app started
         needsDiskAccess = false
         let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: red4Dir, withIntermediateDirectories: true)
+            // Off 2.5, the 2.5 loader/plugins come out first: on 2.3.1 their plugin files share paths with the
+            // parked 2.3.1 ones that restoreParked() moves back.
+            if !native25Active { try removeNative25Files() }
             if pluginsSupported { try restoreParked() }   // before the copies below refresh them from the bundle
             for f in payloadFiles {
                 let src = res.appendingPathComponent(f)
@@ -315,11 +417,14 @@ final class Model: ObservableObject {
             }
             var leftInPlace: [String] = []
             if !pluginsSupported { leftInPlace = try park231Files(res) }
+            if native25Active, let root = native25Root() { try installNative25(root) }
             try deployScc()            // redscript compiler -> <game>/engine/tools/ (script-mod support)
             stripQuarantine(red4Dir)   // files we just wrote (incl. plugins/*) -> make dyld load them
             guard ensureGameEntitlements() else { return }   // status set on failure
             refresh()   // before the message below: refresh() rewrites status
             status = leftInPlace.isEmpty ? "Installed - click Play."
+                : native25Active
+                ? "Installed - click Play. Left in place (not installed by NightCity): \(leftInPlace.joined(separator: ", ")). The 2.5 loader skips anything it can't verify for this game version."
                 : "Installed - click Play. Left in place (not installed by NightCity, built for game 2.3.1): \(leftInPlace.joined(separator: ", ")). Move them out of red4ext/ if the game crashes."
         } catch {
             let msg = error.localizedDescription
@@ -404,6 +509,7 @@ final class Model: ObservableObject {
         // also clear any wrapper left over from earlier builds
         let wrap = "\(red4Dir)/cyberconsole-launch.sh"
         if fm.fileExists(atPath: wrap) { try? fm.removeItem(atPath: wrap) }
+        try? removeNative25Files()
         status = "Uninstalled."
         refresh()
     }
@@ -427,6 +533,7 @@ final class Model: ObservableObject {
     func play() {
         guard gameFound else { status = "Game not found."; return }
         guard !busy else { status = "Please wait for the current operation to finish."; return }
+        gameVersion = readGameVersion()      // a game update while the app was open changes which files belong
         if !fullyInstalled() { install() }   // self-heal stale/partial installs
         // pre-flight: every injected dylib must exist, or the game aborts on launch
         let fm = FileManager.default
@@ -457,8 +564,11 @@ final class Model: ObservableObject {
         // never within a session - so the plugin natives silently never reached the bundle. Same skip-logic
         // trap the /tmp enable-flags hit below.
         let canStagePlugins = nctoolPath() != nil && pluginsSupported
+        // 2.5: the native loader's plugins; their scripts are staged by the launcher itself (no nctool needed).
+        let stageNative = native25Active
+        if !stageNative { try? fm.removeItem(atPath: pluginScriptsStage) }   // 2.5 plugin natives exist only on 2.5
         let sccReady = fm.isExecutableFile(atPath: sccGamePath)
-        if needRegen || needCompile || canStagePlugins {
+        if needRegen || needCompile || canStagePlugins || stageNative {
             busy = true; progress = 0
             busyDetail = needRegen ? "Preparing mods…" : "Compiling scripts…"
             status = busyDetail
@@ -476,6 +586,8 @@ final class Model: ObservableObject {
                 if canStagePlugins {
                     self.runNctoolStreaming(["stageplugins", self.gamePath]) { _ in }
                 }
+                var refused: [String] = []
+                if stageNative { refused = self.stageNativePluginScripts() }
                 var compileWarn: String? = nil
                 // Re-check after staging: the freshly staged plugin reds may be the only scripts present.
                 if needCompile || (sccReady && self.hasScripts()) {
@@ -489,6 +601,8 @@ final class Model: ObservableObject {
                     // but tell the user their script mod didn't take.
                     if let w = compileWarn {
                         self.status = "Launched, but a script mod failed to compile (previous scripts kept): \(w)"
+                    } else if !refused.isEmpty {
+                        self.status = "Launched. Not loaded on this game version (not verified for it): \(refused.joined(separator: ", "))."
                     }
                 }
             }
@@ -501,8 +615,9 @@ final class Model: ObservableObject {
         ensureSteam()
         // On non-Apple volumes (exFAT/FAT) macOS writes "._name" AppleDouble sidecars next to every file. The game's
         // own *.archive scan of archive/Mac/mod picks a "._x.archive" up, fails to read it and crashes at startup
-        // (2.5); scc and TweakXL likewise read sidecars as sources. Remove them from the folders the game reads.
-        for dir in ["archive/Mac/mod", "r6/scripts", "r6/tweaks"] where FileManager.default.fileExists(atPath: "\(gamePath)/\(dir)") {
+        // (2.5); scc and TweakXL likewise read sidecars as sources, and RED4ext tries every "._x.dylib" as a plugin.
+        // Remove them from the folders the game reads.
+        for dir in ["archive/Mac/mod", "r6/scripts", "r6/tweaks", "red4ext/plugins"] where FileManager.default.fileExists(atPath: "\(gamePath)/\(dir)") {
             stripAppleDoubles("\(gamePath)/\(dir)")
         }
         // ALWAYS restore the macOS compatibility-layer enable-flags before launch. These live in /tmp and are

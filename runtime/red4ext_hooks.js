@@ -1271,8 +1271,11 @@ rpc.exports = {
         // serialized (cybermodman_tweakReload EnsureInitialized, cybermodman_archiveReload compare_exchange),
         // so queueing at several delays to bracket the TweakDB/depot ready window is harmless - the call that
         // lands after readiness is the one that takes effect. Disable by creating /tmp/cp2077_no_autoload.
+        // The two exports exist only in the 2.3.1 plugin builds; on 2.5 the native TweakXL/ArchiveXL load mods at startup.
         try {
-            if (readFile('/tmp/cp2077_no_autoload') === null) {
+            if (!isGame231()) {
+                log('[AUTOLOAD] not needed on game ' + getGameVersion() + ' (TweakXL/ArchiveXL load mods at startup)');
+            } else if (readFile('/tmp/cp2077_no_autoload') === null) {
                 var alDelays = [6000, 14000, 26000, 45000];
                 alDelays.forEach(function (d) {
                     setTimeout(function () {

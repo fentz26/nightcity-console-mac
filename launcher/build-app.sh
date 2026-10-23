@@ -36,6 +36,16 @@ mkdir -p "$APP/Contents/Resources/plugins"
 bash tools/vendor-plugin.sh deps/TweakXL.dylib   "$APP/Contents/Resources/plugins/TweakXL"
 bash tools/vendor-plugin.sh deps/ArchiveXL.dylib "$APP/Contents/Resources/plugins/ArchiveXL"
 
+# Native macOS RED4ext + TweakXL + ArchiveXL for game 2.5 (deps/native25, from fetch-deps.sh NATIVE25_DIR). Their
+# own red4ext/ layout is kept; the launcher installs this tree instead of the 2.3.1 loader and plugins on 2.5.
+if [ -f deps/native25/RED4ext.dylib ]; then
+  echo "==> bundling the native 2.5 loader + plugins"
+  rsync -a --exclude '._*' deps/native25/ "$APP/Contents/Resources/native25/"
+  cp runtime/native25/config.ini "$APP/Contents/Resources/native25/"
+else
+  echo "  [warn] deps/native25 missing (set NATIVE25_DIR for tools/fetch-deps.sh) - on 2.5 only the console installs"
+fi
+
 echo "==> bundling nctool mod engine (drag-drop installer)"
 # nctool is the cp2077 archive/mod engine. Publish it self-contained (multi-file: the single-file variant
 # tucks libkraken into a lib/ subfolder the runtime can't find) so the shipped app needs no dotnet; the
@@ -81,6 +91,9 @@ if [ -f assets/icon.png ]; then
 fi
 
 echo "==> ad-hoc signing"
+# On exFAT/FAT volumes macOS writes "._*" AppleDouble sidecars next to every file; codesign treats them as unsigned
+# nested code and refuses the bundle.
+find "$APP" -name '._*' -delete
 codesign -s - --deep --force "$APP" >/dev/null
 echo "built $APP"
 echo "Run it:  open \"$APP\"   (first launch may need right-click -> Open until notarized)"
