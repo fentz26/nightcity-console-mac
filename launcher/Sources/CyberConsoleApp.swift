@@ -145,6 +145,14 @@ final class Model: ObservableObject {
     // run and only overwrites the cache when compilation SUCCEEDS, so a broken script mod fail-opens to
     // the previous good cache. A full compile takes ~0.3s. Returns nil on success, else a short error.
     // MUST be called off the main thread.
+    // On 2.5 the compiled scripts go to a separate cache file that only NightCity's launch points the game at
+    // (-scriptsBlobPath=<file>). The game's own r6/cache/final.redscripts stays vanilla, so starting the game without
+    // NightCity (e.g. from Steam) does not load declarations of plugin natives nobody registers - which stops the
+    // game at startup with "Failed to initialize scripts data!". With a separate output file scc also puts the
+    // vanilla cache back if an earlier compile had overwritten it (from its final.redscripts.bk).
+    var separateScriptCache: Bool { (gameVersion ?? readGameVersion()) == "2.5.0" }
+    var moddedScriptCache: String { "\(gamePath)/r6/cache/modded/final.redscripts" }
+
     private func compileScripts() -> String? {
         let scriptsDir = "\(gamePath)/r6/scripts"
         stripAppleDoubles(scriptsDir)   // scc reads "._x.reds" sidecars as sources and stops ("Could not load script sources")
@@ -154,6 +162,11 @@ final class Model: ObservableObject {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: sccGamePath)
         p.arguments = ["-compile", scriptsDir]
+        if separateScriptCache {
+            try? FileManager.default.createDirectory(atPath: (moddedScriptCache as NSString).deletingLastPathComponent,
+                                                     withIntermediateDirectories: true)
+            p.arguments! += ["-outputCacheFile", moddedScriptCache]
+        }
         let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
         do { try p.run() } catch { return "could not run scc: \(error.localizedDescription)" }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -687,6 +700,9 @@ final class Model: ObservableObject {
         p.executableURL = URL(fileURLWithPath: binaryPath)
         p.currentDirectoryURL = URL(fileURLWithPath: gamePath)
         p.environment = env
+        if separateScriptCache && FileManager.default.fileExists(atPath: moddedScriptCache) {
+            p.arguments = ["-scriptsBlobPath=\(moddedScriptCache)"]   // the game ignores the option as two arguments
+        }
         do {
             try p.run()
             status = "Launched - your mods load automatically. Press  `  or  F1  for the console."

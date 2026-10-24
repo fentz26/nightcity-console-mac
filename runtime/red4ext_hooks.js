@@ -655,7 +655,10 @@ rpc.exports = {
         function ensureReg(){ if(reg) return; reg=new NativeFunction(base.add(OFF.rttiGet),'pointer',[])(); const rv=reg.readPointer();
             GetClass=new NativeFunction(rv.add(0x10).readPointer(),'pointer',['pointer','uint64']);
             GetEnum =new NativeFunction(rv.add(0x18).readPointer(),'pointer',['pointer','uint64']); }
-        let player=null, playerVt=null, fromtd=null, depth=0, busy=false, lastCmd='', lastLReq=''; const pendingQ=[];
+        let player=null, playerVt=null, fromtd=null, busy=false, lastCmd='', lastLReq=''; const pendingQ=[];
+        // Executor nesting depth per thread. One shared counter stalled the queue for the rest of the session
+        // whenever a script call on some other thread never returned (seen on 2.5 during quests).
+        const depthByTid={}; let qWaitSince=0;
         const playerCands=[], playerCandSet=new Set(); let devOwner=null;  // cached dev-data owner (the local player)
         function addCand(ctx){ const k=ctx.toString(); if(playerCandSet.has(k)) return; playerCandSet.add(k); playerCands.push(ctx); if(playerCands.length>8){ const old=playerCands.shift(); playerCandSet.delete(old.toString()); } }
         const instReg={}, seenVt=new Set(); let nameHookInstalled=false;
@@ -1224,6 +1227,8 @@ rpc.exports = {
         setInterval(function(){ try{ const c=readFile(CMD); const s=(c||'').trim();
             if(!s){ lastCmd=''; }                          // file empty -> re-arm so an identical next command fires again
             else if(s!==lastCmd){ lastCmd=s; const cmd=s.replace(/^\d+\t/,''); pendingQ.push(cmd); clearFile(CMD); log('queued: '+cmd); }
+            if(!pendingQ.length) qWaitSince=0; else if(!qWaitSince) qWaitSince=Date.now();
+            else if(qWaitSince>0 && Date.now()-qWaitSince>5000){ qWaitSince=-1; log('  [warn] command queue waiting >5s; executor depth by thread: '+JSON.stringify(depthByTid)+(busy?' (busy)':'')); }
             // Q7: Lua Game.* call bridge - a separate synchronous channel (lreq -> lres), queued like a command
             const lq=readFile(LREQ); const ls=(lq||'').trim();
             if(!ls){ lastLReq=''; }
@@ -1246,7 +1251,7 @@ rpc.exports = {
             else log('shutdown-exit: _exit unresolved'); }catch(e){ log('shutdown-exit err: '+e); }
         log('==== MINI-CET v3 (universal call + perks/attrs/relic) ready ====');
         Interceptor.attach(execAddr,{
-            onEnter:function(args){ depth++; if(busy) return;
+            onEnter:function(args){ const tid=this.threadId; depthByTid[tid]=(depthByTid[tid]||0)+1; if(busy) return;
                 try{ const fn=args[0],ctx=args[1]; if(fn.isNull()||ctx.isNull()) return;
                     if(!fromtd){ const nm='0x'+fn.add(0x08).readU64().toString(16); if(nm==='0x150155547ef75590'){ const rp=fn.add(0x18).readPointer(); fromtd={fn:fn,ctx:ctx,retType:rp.isNull()?ptr(0):rp.readPointer()}; } }
                     const vt=ctx.readPointer(); if(vt.isNull()) return;
@@ -1262,7 +1267,7 @@ rpc.exports = {
                     if(meta.isNull()) return; const fv=meta.sub(base).add(FV0).toString(16); instReg[fv]=ctx;
                     if(nameOf(meta)===PLAYER){ playerVt=vt; player=ctx; addCand(ctx); }
                 }catch(e){} },
-            onLeave:function(r){ depth--; if(busy) return; if(pendingQ.length&&depth===0){ const cmd=pendingQ.shift(); busy=true; try{ execute(cmd); }catch(e){ log('exec err '+e); } busy=false; } }
+            onLeave:function(r){ const tid=this.threadId, d=(depthByTid[tid]||1)-1; if(d>0) depthByTid[tid]=d; else delete depthByTid[tid]; if(busy) return; if(pendingQ.length&&d===0){ const cmd=pendingQ.shift(); busy=true; try{ execute(cmd); }catch(e){ log('exec err '+e); } busy=false; } }
         });
 
         // ---- AUTO-LOAD: apply installed mods on launch, no console needed (NightCity Console increment 4).
